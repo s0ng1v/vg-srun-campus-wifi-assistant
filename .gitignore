@@ -1,0 +1,38 @@
+# Dependencies and build output
+node_modules/
+dist/
+target/
+src-tauri/target/
+src-tauri/gen/
+*.pdb
+*.exe
+*.msi
+
+# IDE and local tooling
+.idea/
+.vscode/
+*.user
+*.suo
+
+# Runtime data must never be committed
+*.log
+*.dat
+*.bin
+*.key
+*.pem
+config.local.json
+*.local.toml
+
+# Browser and test artifacts
+.chrome-headless-profile/
+previews/
+playwright-report/
+test-results/
+
+# Environment and package-manager noise
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+

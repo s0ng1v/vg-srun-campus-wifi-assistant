@@ -1,0 +1,20 @@
+[package]
+name = "vg-campus-assistant"
+version.workspace = true
+description = "VG Campus Wi-Fi Assistant desktop application"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.4.0", features = [] }
+
+[dependencies]
+serde_json.workspace = true
+srun-core = { path = "../crates/srun-core" }
+srun-ipc = { path = "../crates/srun-ipc" }
+tauri = { version = "2.8.2", features = [] }
+tauri-plugin-opener = "2"
+tokio.workspace = true
+

@@ -1,0 +1,32 @@
+{
+  "name": "vg-campus-wifi-assistant",
+  "version": "0.1.0",
+  "description": "A lightweight Srun campus Wi-Fi assistant for Windows.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:renderer": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build:renderer": "tsc --noEmit && vite build",
+    "build": "tauri build --no-bundle --ignore-version-mismatches",
+    "tauri": "tauri",
+    "check:lens": "node tools/verify-lens.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.10.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.542.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tailwind-merge": "3.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.0"
+  }
+}
