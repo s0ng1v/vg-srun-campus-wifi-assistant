@@ -160,7 +160,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.2",
+  daemon_version: "0.1.3",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -436,7 +436,10 @@ function NetworkGuard({
             <div className="vg-resource-row" aria-label="守护进程资源占用">
               <span><Cpu /><span>CPU</span><strong className="vg-selectable">{enabled ? `${cpuPercent.toFixed(2)} %` : "—"}</strong></span>
               <span><MemoryStick /><span>内存</span><strong className="vg-selectable">{enabled && memoryBytes ? `${(memoryBytes / 1024 / 1024).toFixed(2)} MB` : "—"}</strong></span>
-              <span className="vg-sample-note">{phaseLabel(phase)}</span>
+              <span className="vg-runtime-note">
+                <span className="vg-sample-note">{phaseLabel(phase)}</span>
+                <span className="vg-process-name" title="可在任务管理器中搜索此进程名">vg-campus-daemon.exe</span>
+              </span>
             </div>
           </div>
         )}
@@ -1368,7 +1371,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.2</b></span>
+          <span>VG校园网助手 <b>0.1.3</b></span>
         </footer>
       </div>
 
@@ -1484,7 +1487,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.2 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.3 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

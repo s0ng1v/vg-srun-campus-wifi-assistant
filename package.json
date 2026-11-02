@@ -1,6 +1,6 @@
 {
   "name": "vg-campus-wifi-assistant",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A lightweight Srun campus Wi-Fi assistant for Windows.",
   "private": true,
   "type": "module",
