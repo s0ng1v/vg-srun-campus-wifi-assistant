@@ -11,6 +11,7 @@ use crate::fsutil::replace_file;
 
 const CONFIG_SCHEMA_VERSION: u32 = 3;
 const CHD_PORTAL_URL: &str = "https://beiradius.chd.edu.cn";
+const CHD_SERVICE_URL: &str = "https://shenlan.chd.edu.cn:8800";
 const CHD_AC_ID: &str = "5";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +42,7 @@ impl Default for AppConfig {
                 base_url: CHD_PORTAL_URL.into(),
                 ac_id: CHD_AC_ID.into(),
                 domain: String::new(),
+                service_url: Some(CHD_SERVICE_URL.into()),
             }),
             accounts: Vec::new(),
             active_account_id: None,
@@ -102,6 +104,7 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
         );
     }
     let mut migrated = config.schema_version < CONFIG_SCHEMA_VERSION;
+    let mut invalidate_verification = migrated;
     if config.active_account_id.is_none() {
         config.active_account_id = config
             .accounts
@@ -115,15 +118,23 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
         {
             portal.ac_id = CHD_AC_ID.into();
             migrated = true;
+            invalidate_verification = true;
         }
         if !portal.domain.is_empty() && !srun_core::valid_portal_domain(&portal.domain) {
             portal.domain.clear();
             migrated = true;
+            invalidate_verification = true;
+        }
+        if portal.service_url.is_none() && portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL {
+            portal.service_url = Some(CHD_SERVICE_URL.into());
+            migrated = true;
         }
     }
     if migrated {
-        for account in &mut config.accounts {
-            account.verified = false;
+        if invalidate_verification {
+            for account in &mut config.accounts {
+                account.verified = false;
+            }
         }
         config.schema_version = CONFIG_SCHEMA_VERSION;
         let _ = save_config(paths, &config);
@@ -189,6 +200,7 @@ mod tests {
         let default_portal = AppConfig::default().portal.unwrap();
         assert_eq!(default_portal.base_url, CHD_PORTAL_URL);
         assert_eq!(default_portal.ac_id, "5");
+        assert_eq!(default_portal.service_url.as_deref(), Some(CHD_SERVICE_URL));
 
         let directory = std::env::temp_dir().join(format!(
             "vg-campus-config-migration-test-{}",
@@ -215,8 +227,48 @@ mod tests {
         fs::write(&paths.config, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
         let migrated = load_config(&paths).unwrap();
         assert_eq!(migrated.schema_version, CONFIG_SCHEMA_VERSION);
-        assert_eq!(migrated.portal.unwrap().ac_id, "5");
+        let portal = migrated.portal.unwrap();
+        assert_eq!(portal.ac_id, "5");
+        assert_eq!(portal.service_url.as_deref(), Some(CHD_SERVICE_URL));
         assert!(!migrated.accounts[0].verified);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn adding_self_service_url_keeps_account_verification() {
+        let directory = std::env::temp_dir().join(format!(
+            "vg-campus-config-service-url-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::from_root(&directory).unwrap();
+        let current = serde_json::json!({
+            "schema_version": CONFIG_SCHEMA_VERSION,
+            "guard_enabled": false,
+            "auto_start_enabled": false,
+            "portal": {
+                "base_url": CHD_PORTAL_URL,
+                "ac_id": CHD_AC_ID,
+                "domain": ""
+            },
+            "accounts": [{
+                "id": "verified",
+                "username": "fixture",
+                "enabled": true,
+                "verified": true
+            }],
+            "active_account_id": "verified"
+        });
+        fs::write(&paths.config, serde_json::to_vec_pretty(&current).unwrap()).unwrap();
+
+        let loaded = load_config(&paths).unwrap();
+        assert_eq!(
+            loaded
+                .portal
+                .as_ref()
+                .and_then(|portal| portal.service_url.as_deref()),
+            Some(CHD_SERVICE_URL)
+        );
+        assert!(loaded.accounts[0].verified);
         fs::remove_dir_all(directory).unwrap();
     }
 }

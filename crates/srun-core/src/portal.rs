@@ -1,6 +1,11 @@
-use std::{sync::OnceLock, time::Duration};
+use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
 
-use reqwest::Client;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use reqwest::{
+    header::{HeaderMap, CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE},
+    redirect::Policy,
+    Client,
+};
 use serde_json::{json, Value};
 use url::Url;
 
@@ -175,6 +180,113 @@ impl PortalClient {
     }
 
     pub async fn logout(&self, info: &UserInfo) -> Result<(), SrunError> {
+        if self.profile.service_url.is_some() {
+            match self.logout_via_self_service(info).await {
+                Ok(()) => return Ok(()),
+                Err(service_error) => {
+                    return match self.logout_via_portal(info).await {
+                        Ok(()) => Ok(()),
+                        Err(portal_error) => Err(SrunError::InvalidResponse(format!(
+                            "自助服务注销失败：{service_error}；认证门户注销失败：{portal_error}"
+                        ))),
+                    };
+                }
+            }
+        }
+        self.logout_via_portal(info).await
+    }
+
+    async fn logout_via_self_service(&self, info: &UserInfo) -> Result<(), SrunError> {
+        let service_url = self
+            .profile
+            .service_url
+            .as_deref()
+            .ok_or_else(|| SrunError::InvalidResponse("校园网自助服务地址未配置".into()))?;
+        let service = Url::parse(service_url)
+            .map_err(|error| SrunError::InvalidResponse(error.to_string()))?;
+        let username = info
+            .display_username()
+            .and_then(|value| value.split('@').next())
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| SrunError::InvalidResponse("缺少用于自助服务登录的账号".into()))?;
+        let sso_data = STANDARD.encode(format!("zh-CN:{username}"));
+        let mut url = service
+            .join("/site/sso")
+            .map_err(|error| SrunError::InvalidResponse(error.to_string()))?;
+        url.query_pairs_mut().append_pair("data", &sso_data);
+
+        let http = Client::builder()
+            .connect_timeout(Duration::from_secs(4))
+            .timeout(Duration::from_secs(10))
+            .redirect(Policy::none())
+            .user_agent(concat!("VGCampusWifiAssistant/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        let mut cookies = BTreeMap::new();
+        let mut home_html = None;
+
+        for _ in 0..8 {
+            let response = http
+                .get(url.clone())
+                .header(COOKIE, cookie_header(&cookies))
+                .send()
+                .await?;
+            absorb_cookies(response.headers(), &mut cookies);
+            if response.status().is_redirection() {
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or_else(|| SrunError::InvalidResponse("自助服务登录跳转缺少地址".into()))?;
+                url = response
+                    .url()
+                    .join(location)
+                    .map_err(|error| SrunError::InvalidResponse(error.to_string()))?;
+                continue;
+            }
+            if !response.status().is_success() {
+                return Err(SrunError::InvalidResponse(format!(
+                    "自助服务登录返回 HTTP {}",
+                    response.status()
+                )));
+            }
+            if !response.url().path().starts_with("/home") {
+                return Err(SrunError::InvalidResponse(
+                    "自助服务登录后没有进入用户首页".into(),
+                ));
+            }
+            home_html = Some(response.text().await?);
+            break;
+        }
+
+        let home_html = home_html
+            .ok_or_else(|| SrunError::InvalidResponse("自助服务登录跳转次数过多".into()))?;
+        let csrf = extract_csrf_token(&home_html)
+            .ok_or_else(|| SrunError::InvalidResponse("自助服务页面缺少 CSRF token".into()))?;
+        let onekey_url = service
+            .join("/home/onekey")
+            .map_err(|error| SrunError::InvalidResponse(error.to_string()))?;
+        let response = http
+            .post(onekey_url)
+            .header(COOKIE, cookie_header(&cookies))
+            .header("X-CSRF-Token", &csrf)
+            .header(
+                CONTENT_TYPE,
+                "application/x-www-form-urlencoded;charset=UTF-8",
+            )
+            .form(&[("_csrf-8800", csrf.as_str())])
+            .send()
+            .await?;
+        if response.status().is_success() || response.status().is_redirection() {
+            Ok(())
+        } else {
+            Err(SrunError::InvalidResponse(format!(
+                "自助服务一键下线返回 HTTP {}",
+                response.status()
+            )))
+        }
+    }
+
+    async fn logout_via_portal(&self, info: &UserInfo) -> Result<(), SrunError> {
         let username = info
             .display_username()
             .ok_or_else(|| SrunError::InvalidResponse("缺少用于注销的账号".into()))?;
@@ -213,6 +325,48 @@ impl PortalClient {
         base.set_fragment(None);
         Ok(base)
     }
+}
+
+fn absorb_cookies(headers: &HeaderMap, cookies: &mut BTreeMap<String, String>) {
+    for value in headers.get_all(SET_COOKIE).iter() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        let Some((name, value_and_attributes)) = value.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value_and_attributes
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !name.is_empty() {
+            cookies.insert(name.to_owned(), value.to_owned());
+        }
+    }
+}
+
+fn cookie_header(cookies: &BTreeMap<String, String>) -> String {
+    cookies
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn extract_csrf_token(html: &str) -> Option<String> {
+    let patterns = [
+        r#"(?i)name=["']_csrf-8800["']\s+value=["']([^"']+)["']"#,
+        r#"(?i)name=["']csrf-token["']\s+content=["']([^"']+)["']"#,
+    ];
+    patterns.iter().find_map(|pattern| {
+        regex::Regex::new(pattern)
+            .ok()?
+            .captures(html)?
+            .get(1)
+            .map(|value| value.as_str().to_owned())
+    })
 }
 
 pub async fn probe_external() -> ExternalProbe {
@@ -314,6 +468,7 @@ mod tests {
             base_url: "http://portal.example.edu.cn".into(),
             ac_id: "1".into(),
             domain: String::new(),
+            service_url: None,
         };
         assert!(profile.validate().is_err());
     }
@@ -325,5 +480,19 @@ mod tests {
         assert!(same_portal_identity("10000001@cmcc", "10000001@cmcc"));
         assert!(!same_portal_identity("10000001@ctcc", "10000001@cmcc"));
         assert!(!same_portal_identity("20000002", "10000001"));
+    }
+
+    #[test]
+    fn extracts_self_service_csrf_token() {
+        let html = r#"<form><input type="hidden" name="_csrf-8800" value="token/value"></form>"#;
+        assert_eq!(extract_csrf_token(html).as_deref(), Some("token/value"));
+    }
+
+    #[test]
+    fn serializes_cookies_for_self_service_requests() {
+        let mut cookies = BTreeMap::new();
+        cookies.insert("session".into(), "abc".into());
+        cookies.insert("identity".into(), "def".into());
+        assert_eq!(cookie_header(&cookies), "identity=def; session=abc");
     }
 }

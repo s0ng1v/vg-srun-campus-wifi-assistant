@@ -10,6 +10,8 @@ pub struct PortalProfile {
     pub ac_id: String,
     #[serde(default)]
     pub domain: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_url: Option<String>,
 }
 
 impl PortalProfile {
@@ -24,6 +26,20 @@ impl PortalProfile {
         }
         if self.ac_id.trim().is_empty() {
             return Err(SrunError::InvalidPortal("门户缺少 ac_id".into()));
+        }
+        if let Some(service_url) = self
+            .service_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let service = Url::parse(service_url)
+                .map_err(|error| SrunError::InvalidPortal(error.to_string()))?;
+            if service.scheme() != "https" || service.host_str().is_none() {
+                return Err(SrunError::InvalidPortal(
+                    "自助服务地址必须是有效的 HTTPS 地址".into(),
+                ));
+            }
         }
         Ok(url)
     }

@@ -160,7 +160,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.1",
+  daemon_version: "0.1.2",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -796,7 +796,7 @@ function SwitchAccountDialog({
       open={Boolean(account)}
       onClose={onCancel}
       title="切换登录账号"
-      description={account ? `将注销当前会话并登录 ${account.username}。` : ""}
+      description={account ? `将先执行一键下线，再登录 ${account.username}。` : ""}
       footer={(
         <>
           <LensActionButton label="取消" onPress={onCancel} />
@@ -804,7 +804,7 @@ function SwitchAccountDialog({
         </>
       )}
     >
-      <p className="vg-form-hint">如果目标账号登录失败，守护会尝试恢复原账号。</p>
+      <p className="vg-form-hint">切换过程会短暂断网；如果目标账号登录失败，守护会尝试恢复原账号。</p>
     </LensDialog>
   );
 }
@@ -1368,7 +1368,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.1</b></span>
+          <span>VG校园网助手 <b>0.1.2</b></span>
         </footer>
       </div>
 
@@ -1484,7 +1484,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.1 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.2 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

@@ -322,6 +322,7 @@ impl GuardWorker {
                     .logout(&current)
                     .await
                     .map_err(|error| safe_error_ref(&error))?;
+                tokio::time::sleep(Duration::from_millis(750)).await;
                 self.state.online = false;
                 self.state.user = None;
             } else if current.is_online() {
@@ -466,6 +467,7 @@ impl GuardWorker {
         };
         if current.is_online() {
             client.logout(&current).await.map_err(safe_error)?;
+            tokio::time::sleep(Duration::from_millis(750)).await;
         }
 
         match client

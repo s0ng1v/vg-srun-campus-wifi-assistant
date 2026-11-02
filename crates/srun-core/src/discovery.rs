@@ -64,6 +64,7 @@ pub fn portal_profile_from_login_url(input: &str) -> Result<PortalProfile, SrunE
         base_url: format!("https://{host}"),
         ac_id,
         domain: String::new(),
+        service_url: None,
     };
     profile.validate()?;
     Ok(profile)
@@ -90,22 +91,30 @@ pub async fn enrich_portal_profile(mut profile: PortalProfile) -> PortalProfile 
     let Ok(page) = response.text().await else {
         return profile;
     };
-    if let Some(domain) = extract_portal_domain(&page) {
-        profile.domain = domain;
-        return profile;
+    apply_portal_page_config(&mut profile, &page);
+    if profile.domain.is_empty() || profile.service_url.is_none() {
+        discover_portal_scripts(&client, &page_url, &page, &mut profile).await;
     }
+    profile
+}
 
+async fn discover_portal_scripts(
+    client: &Client,
+    page_url: &Url,
+    page: &str,
+    profile: &mut PortalProfile,
+) {
     let Ok(script_regex) = Regex::new(r#"(?i)<script[^>]+src=["']([^"']+)["']"#) else {
-        return profile;
+        return;
     };
-    for captures in script_regex.captures_iter(&page).take(20) {
+    for captures in script_regex.captures_iter(page).take(20) {
         let Some(source) = captures.get(1).map(|value| value.as_str()) else {
             continue;
         };
         let Ok(url) = page_url.join(source) else {
             continue;
         };
-        if url.scheme() != "https" || url.host_str() != base.host_str() {
+        if url.scheme() != "https" || url.host_str() != page_url.host_str() {
             continue;
         }
         let Ok(response) = client.get(url).send().await else {
@@ -114,12 +123,24 @@ pub async fn enrich_portal_profile(mut profile: PortalProfile) -> PortalProfile 
         let Ok(script) = response.text().await else {
             continue;
         };
-        if let Some(domain) = extract_portal_domain(&script) {
-            profile.domain = domain;
+        apply_portal_page_config(profile, &script);
+        if !profile.domain.is_empty() && profile.service_url.is_some() {
             break;
         }
     }
-    profile
+}
+
+fn apply_portal_page_config(profile: &mut PortalProfile, source: &str) {
+    if profile.domain.is_empty() {
+        if let Some(domain) = extract_portal_domain(source) {
+            profile.domain = domain;
+        }
+    }
+    if profile.service_url.is_none() {
+        if let Some(service_url) = extract_service_url(source) {
+            profile.service_url = Some(service_url);
+        }
+    }
 }
 
 pub fn extract_portal_domain(source: &str) -> Option<String> {
@@ -158,6 +179,19 @@ pub fn valid_portal_domain(value: &str) -> bool {
         })
 }
 
+pub fn extract_service_url(source: &str) -> Option<String> {
+    let pattern = r#"(?i)["']?ServiceIP["']?\s*:\s*["']([^"']+)["']"#;
+    let value = Regex::new(pattern)
+        .ok()?
+        .captures(source)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .trim_end_matches('/');
+    let url = Url::parse(value).ok()?;
+    (url.scheme() == "https" && url.host_str().is_some()).then(|| value.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +220,20 @@ mod tests {
         assert!(!valid_portal_domain("Domain"));
         assert!(valid_portal_domain("cmcc"));
         assert!(valid_portal_domain("@campus"));
+    }
+
+    #[test]
+    fn extracts_https_self_service_url() {
+        assert_eq!(
+            extract_service_url(
+                r#"portal: {"ServiceIP":"https://service.example.edu.cn:8800/","AuthIP":""}"#
+            ),
+            Some("https://service.example.edu.cn:8800".into())
+        );
+        assert_eq!(
+            extract_service_url(r#"portal: {"ServiceIP":"http://service.example.edu.cn"}"#),
+            None
+        );
     }
 
     #[test]
