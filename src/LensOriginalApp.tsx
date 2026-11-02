@@ -160,7 +160,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.3",
+  daemon_version: "0.1.5",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -1371,7 +1371,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.3</b></span>
+          <span>VG校园网助手 <b>0.1.5</b></span>
         </footer>
       </div>
 
@@ -1487,7 +1487,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.3 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.5 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

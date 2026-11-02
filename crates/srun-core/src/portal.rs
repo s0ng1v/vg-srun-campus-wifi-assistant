@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::OnceLock, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use reqwest::{
@@ -60,6 +64,32 @@ impl PortalClient {
         Ok(self.get_user_info().await?.is_online())
     }
 
+    pub async fn get_user_info_settled(&self, timeout: Duration) -> Result<UserInfo, SrunError> {
+        let info = self.get_user_info_best_effort(timeout).await?;
+        if info.is_rate_limited() {
+            return Err(SrunError::Login(LoginFailure::new(
+                LoginFailureKind::Unknown,
+                "speed_limit_error",
+                "门户查询频率受限，请稍后重试",
+            )));
+        }
+        Ok(info)
+    }
+
+    pub async fn get_user_info_best_effort(
+        &self,
+        timeout: Duration,
+    ) -> Result<UserInfo, SrunError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let info = self.get_user_info().await?;
+            if !info.is_rate_limited() || Instant::now() >= deadline {
+                return Ok(info);
+            }
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
+    }
+
     pub async fn get_challenge(&self, username: &str, ip: &str) -> Result<String, SrunError> {
         let url = self.endpoint("/cgi-bin/get_challenge")?;
         let response = self
@@ -84,13 +114,10 @@ impl PortalClient {
     }
 
     pub async fn login(&self, account: &SrunAccount) -> Result<UserInfo, SrunError> {
-        let real_username = build_username(&account.username, &self.profile.domain);
-        let before = self.get_user_info().await?;
+        let before = self.get_user_info_settled(Duration::from_secs(10)).await?;
         let ip = before.client_ip().unwrap_or_default().to_owned();
-        let challenge = self.get_challenge(&real_username, &ip).await?;
-
         let client_ip = if ip.is_empty() {
-            self.get_user_info()
+            self.get_user_info_settled(Duration::from_secs(10))
                 .await?
                 .client_ip()
                 .unwrap_or_default()
@@ -98,6 +125,23 @@ impl PortalClient {
         } else {
             ip
         };
+        self.login_with_ip(account, &client_ip, true).await
+    }
+
+    pub async fn login_after_logout(
+        &self,
+        account: &SrunAccount,
+        client_ip: &str,
+    ) -> Result<UserInfo, SrunError> {
+        self.login_with_ip(account, client_ip, false).await
+    }
+
+    async fn login_with_ip(
+        &self,
+        account: &SrunAccount,
+        client_ip: &str,
+        require_confirmation: bool,
+    ) -> Result<UserInfo, SrunError> {
         if client_ip.is_empty() {
             return Err(SrunError::Login(LoginFailure::new(
                 LoginFailureKind::MissingClientIp,
@@ -106,6 +150,8 @@ impl PortalClient {
             )));
         }
 
+        let real_username = build_username(&account.username, &self.profile.domain);
+        let challenge = self.get_challenge(&real_username, client_ip).await?;
         let hmd5 = hmac_md5_hex(&account.password, &challenge);
         let info = json!({
             "username": real_username,
@@ -140,43 +186,82 @@ impl PortalClient {
                 ("chksum", checksum),
                 ("info", info_encoded),
                 ("ac_id", self.profile.ac_id.clone()),
-                ("ip", client_ip),
+                ("ip", client_ip.to_owned()),
                 ("n", "200".to_owned()),
                 ("type", "1".to_owned()),
                 ("_", unix_millis().to_string()),
             ])
             .send()
             .await?;
-        let text = response.text().await?;
-        let value = parse_jsonp(&text)?;
-        if login_value_succeeded(&value) {
-            let session = self.get_user_info().await?;
-            if !session.is_online() {
-                return Err(SrunError::Login(LoginFailure::new(
-                    LoginFailureKind::Unknown,
-                    "session_not_online",
-                    "登录接口返回成功，但门户会话未建立",
-                )));
-            }
-            let actual_username = session.display_username().unwrap_or_default();
-            if !same_portal_identity(actual_username, &real_username) {
-                return Err(SrunError::Login(LoginFailure::new(
-                    LoginFailureKind::Unknown,
-                    "session_mismatch",
-                    "登录后的门户账号与目标账号不一致",
-                )));
-            }
+        let login_result = response
+            .text()
+            .await
+            .map_err(SrunError::from)
+            .and_then(|text| parse_jsonp(&text));
+        let response_succeeded = login_result.as_ref().is_ok_and(login_value_succeeded);
+        let response_code = login_result
+            .as_ref()
+            .ok()
+            .and_then(login_error_code)
+            .unwrap_or_default();
+        let confirmation_timeout = if response_succeeded {
+            Duration::from_secs(12)
+        } else if response_code == "speed_limit_error" {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(3)
+        };
+        if let Some(session) = self
+            .wait_for_authenticated_session(&real_username, confirmation_timeout)
+            .await
+        {
             return Ok(session);
         }
 
-        let code = string_field(&value, "error")
-            .or_else(|| string_field(&value, "res"))
-            .unwrap_or_default();
+        let value = login_result?;
+        if response_succeeded {
+            if !require_confirmation {
+                return Ok(user_info_from_login_response(
+                    &value,
+                    &real_username,
+                    client_ip,
+                ));
+            }
+            return Err(SrunError::Login(LoginFailure::new(
+                LoginFailureKind::Unknown,
+                "session_not_confirmed",
+                "登录接口返回成功，但未确认目标账号会话",
+            )));
+        }
+        let code = login_error_code(&value).unwrap_or_default();
         let message = string_field(&value, "error_msg")
             .or_else(|| string_field(&value, "message"))
             .or_else(|| string_field(&value, "res"))
             .unwrap_or_default();
         Err(SrunError::Login(LoginFailure::classify(&code, &message)))
+    }
+
+    async fn wait_for_authenticated_session(
+        &self,
+        expected_username: &str,
+        timeout: Duration,
+    ) -> Option<UserInfo> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(info) = self.get_user_info().await {
+                if info.is_online()
+                    && info
+                        .display_username()
+                        .is_some_and(|actual| same_portal_identity(actual, expected_username))
+                {
+                    return Some(info);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
     }
 
     pub async fn logout(&self, info: &UserInfo) -> Result<(), SrunError> {
@@ -327,6 +412,23 @@ impl PortalClient {
     }
 }
 
+fn user_info_from_login_response(value: &Value, username: &str, client_ip: &str) -> UserInfo {
+    let mut info = serde_json::from_value::<UserInfo>(value.clone()).unwrap_or_default();
+    if info.error.is_none() {
+        info.error = Some("ok".into());
+    }
+    if info.display_username().is_none() {
+        info.user_name = Some(username.to_owned());
+    }
+    if info.client_ip.is_none() {
+        info.client_ip = Some(client_ip.to_owned());
+    }
+    if info.online_ip.is_none() {
+        info.online_ip = Some(client_ip.to_owned());
+    }
+    info
+}
+
 fn absorb_cookies(headers: &HeaderMap, cookies: &mut BTreeMap<String, String>) {
     for value in headers.get_all(SET_COOKIE).iter() {
         let Ok(value) = value.to_str() else {
@@ -417,6 +519,10 @@ fn login_value_succeeded(value: &Value) -> bool {
         .any(|value| value.eq_ignore_ascii_case("ok"))
 }
 
+fn login_error_code(value: &Value) -> Option<String> {
+    string_field(value, "error").or_else(|| string_field(value, "res"))
+}
+
 fn string_field(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(|value| match value {
         Value::String(value) => Some(value.clone()),
@@ -494,5 +600,14 @@ mod tests {
         cookies.insert("session".into(), "abc".into());
         cookies.insert("identity".into(), "def".into());
         assert_eq!(cookie_header(&cookies), "identity=def; session=abc");
+    }
+
+    #[test]
+    fn successful_login_response_can_seed_a_session_snapshot() {
+        let value = json!({ "error": "ok" });
+        let info = user_info_from_login_response(&value, "10000001", "10.0.0.2");
+        assert!(info.is_online());
+        assert_eq!(info.display_username(), Some("10000001"));
+        assert_eq!(info.client_ip(), Some("10.0.0.2"));
     }
 }

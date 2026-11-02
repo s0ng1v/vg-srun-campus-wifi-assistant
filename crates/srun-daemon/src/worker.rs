@@ -22,6 +22,7 @@ use crate::vault::{CredentialRecord, CredentialVault};
 
 const ONLINE_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 const FIRST_FAILURE_RECHECK: Duration = Duration::from_secs(10);
+const ACCOUNT_SWITCH_COOLDOWN: Duration = Duration::from_secs(6);
 const NETWORK_BACKOFF: [Duration; 7] = [
     Duration::from_secs(5),
     Duration::from_secs(10),
@@ -53,6 +54,7 @@ pub struct GuardWorker {
     outage_notified: bool,
     action_notification: Option<String>,
     portal_client: Option<(srun_core::PortalProfile, PortalClient)>,
+    last_switch_at: Option<Instant>,
 }
 
 impl GuardWorker {
@@ -85,6 +87,7 @@ impl GuardWorker {
             outage_notified: false,
             action_notification: None,
             portal_client: None,
+            last_switch_at: None,
         })
     }
 
@@ -303,7 +306,7 @@ impl GuardWorker {
                 .cached_client()
                 .map_err(|error| safe_error_ref(&error))?;
             let current = client
-                .get_user_info()
+                .get_user_info_settled(Duration::from_secs(10))
                 .await
                 .map_err(|error| safe_error_ref(&error))?;
             let domain = self
@@ -446,6 +449,13 @@ impl GuardWorker {
         &mut self,
         id: &str,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
+        if let Some(last_switch) = self.last_switch_at {
+            let elapsed = last_switch.elapsed();
+            if elapsed < ACCOUNT_SWITCH_COOLDOWN {
+                tokio::time::sleep(ACCOUNT_SWITCH_COOLDOWN - elapsed).await;
+            }
+        }
+        self.last_switch_at = Some(Instant::now());
         let old_id = self.config.active_account_id.clone();
         let old_record = old_id.as_deref().and_then(|id| self.vault.get(id)).cloned();
         let target = self
@@ -458,25 +468,44 @@ impl GuardWorker {
             .map_err(|error| safe_error_ref(&error))?;
         self.state.phase = GuardPhase::Reconnecting;
 
-        let current = match client.get_user_info().await {
-            Ok(info) => info,
-            Err(error) => {
-                self.set_error(&error);
-                return Err(safe_error(error));
-            }
-        };
-        if current.is_online() {
-            client.logout(&current).await.map_err(safe_error)?;
-            tokio::time::sleep(Duration::from_millis(750)).await;
-        }
-
-        match client
-            .login(&SrunAccount {
-                username: target.username,
-                password: target.password,
-            })
+        let current_probe = match client
+            .get_user_info_best_effort(Duration::from_secs(2))
             .await
         {
+            Ok(info) => info,
+            Err(error) => {
+                return Err(self.fail_switch(&error));
+            }
+        };
+        let current = if current_probe.is_rate_limited() {
+            self.known_session_info(current_probe.client_ip())
+        } else {
+            Some(current_probe)
+        };
+        let known_ip = current
+            .as_ref()
+            .and_then(|info| info.client_ip())
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(current_info) = current.as_ref().filter(|info| info.is_online()) {
+            if let Err(error) = client.logout(current_info).await {
+                return Err(self.fail_switch(&error));
+            }
+            self.state.online = false;
+            self.state.user = None;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+
+        let target_account = SrunAccount {
+            username: target.username,
+            password: target.password,
+        };
+        let target_login = if known_ip.is_empty() {
+            client.login(&target_account).await
+        } else {
+            client.login_after_logout(&target_account, &known_ip).await
+        };
+        match target_login {
             Ok(info) => {
                 self.config.active_account_id = Some(id.to_owned());
                 self.mark_verified(id);
@@ -503,9 +532,11 @@ impl GuardWorker {
                     "目标账号切换失败，已尝试恢复原账号：{}",
                     safe_error(target_error)
                 );
-                if !self.state.online {
-                    self.state.phase = GuardPhase::NeedsAction;
-                }
+                self.state.phase = if self.state.online {
+                    GuardPhase::Online
+                } else {
+                    GuardPhase::NeedsAction
+                };
                 Err(message)
             }
         }
@@ -538,7 +569,10 @@ impl GuardWorker {
             GuardPhase::WaitingNetwork
         };
         let started = Instant::now();
-        let (portal_result, external) = tokio::join!(client.get_user_info(), probe_external());
+        let (portal_result, external) = tokio::join!(
+            client.get_user_info_settled(Duration::from_secs(10)),
+            probe_external()
+        );
         self.state.metrics.last_probe_latency_ms = started.elapsed().as_millis() as u64;
         self.state.metrics.checks_total += 1;
         self.state.last_check_at = Some(now_string());
@@ -804,6 +838,73 @@ impl GuardWorker {
         })
     }
 
+    fn known_session_info(&self, ip_hint: Option<&str>) -> Option<UserInfo> {
+        let active_username = self
+            .config
+            .active_account_id
+            .as_deref()
+            .and_then(|id| self.config.accounts.iter().find(|account| account.id == id))
+            .or_else(|| self.config.accounts.iter().find(|account| account.enabled))
+            .map(|account| account.username.clone());
+        let username = self
+            .state
+            .user
+            .as_ref()
+            .map(|user| user.username.clone())
+            .or(active_username)?;
+        let ip = self
+            .state
+            .user
+            .as_ref()
+            .map(|user| user.ip.clone())
+            .filter(|value| !value.is_empty())
+            .or_else(|| ip_hint.map(ToOwned::to_owned));
+        Some(UserInfo {
+            error: Some("ok".into()),
+            user_name: Some(username),
+            client_ip: ip.clone(),
+            online_ip: ip,
+            user_mac: self.state.user.as_ref().map(|user| user.mac.clone()),
+            products_name: self
+                .state
+                .user
+                .as_ref()
+                .map(|user| user.product_name.clone()),
+            sum_bytes: self
+                .state
+                .user
+                .as_ref()
+                .map(|user| user.total_bytes.to_string()),
+            sum_seconds: self
+                .state
+                .user
+                .as_ref()
+                .map(|user| user.session_seconds.to_string()),
+            user_balance: self
+                .state
+                .user
+                .as_ref()
+                .and_then(|user| user.balance)
+                .map(|value| value.to_string()),
+            add_time: self
+                .state
+                .user
+                .as_ref()
+                .and_then(|user| user.online_since.clone()),
+            ..UserInfo::default()
+        })
+    }
+
+    fn fail_switch(&mut self, error: &SrunError) -> String {
+        self.set_error(error);
+        self.state.phase = if self.state.online {
+            GuardPhase::Online
+        } else {
+            GuardPhase::NeedsAction
+        };
+        safe_error_ref(error)
+    }
+
     fn cached_client(&mut self) -> std::result::Result<PortalClient, SrunError> {
         let profile = self
             .config
@@ -934,7 +1035,11 @@ fn safe_error_ref(error: &SrunError) -> String {
             LoginFailureKind::PortalUnavailable => "校园网认证服务暂时不可用".into(),
             LoginFailureKind::MissingClientIp => "门户没有返回客户端 IP".into(),
             LoginFailureKind::NeedsHumanAction => "登录需要验证码或人工操作".into(),
-            LoginFailureKind::Unknown => "校园网登录未成功".into(),
+            LoginFailureKind::Unknown => match failure.code.as_str() {
+                "speed_limit_error" => "操作过于频繁，请稍后重试".into(),
+                "session_not_confirmed" => "登录结果确认超时，请稍后检测".into(),
+                _ => "校园网登录未成功".into(),
+            },
         },
     }
 }

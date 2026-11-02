@@ -77,14 +77,39 @@ fn process_cpu_100ns() -> Option<u64> {
 
 fn process_memory_bytes() -> Option<u64> {
     use windows_sys::Win32::System::{
-        ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+        ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+        },
         Threading::GetCurrentProcess,
     };
-    let mut counters = PROCESS_MEMORY_COUNTERS {
-        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        ..PROCESS_MEMORY_COUNTERS::default()
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+        ..PROCESS_MEMORY_COUNTERS_EX2::default()
     };
-    let succeeded =
-        unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
-    (succeeded != 0).then_some(counters.WorkingSetSize as u64)
+    let succeeded = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    if succeeded == 0 {
+        return None;
+    }
+    let bytes = if counters.PrivateWorkingSetSize > 0 {
+        counters.PrivateWorkingSetSize
+    } else {
+        counters.WorkingSetSize
+    };
+    Some(bytes as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_memory_uses_a_nonzero_private_working_set() {
+        assert!(process_memory_bytes().is_some_and(|bytes| bytes > 0));
+    }
 }

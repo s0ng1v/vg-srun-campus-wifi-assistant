@@ -108,6 +108,12 @@ impl UserInfo {
             && (self.user_name.is_some() || self.username.is_some() || self.uid.is_some())
     }
 
+    pub fn is_rate_limited(&self) -> bool {
+        self.error
+            .as_deref()
+            .is_some_and(|error| error.eq_ignore_ascii_case("speed_limit_error"))
+    }
+
     pub fn client_ip(&self) -> Option<&str> {
         self.client_ip
             .as_deref()
