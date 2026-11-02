@@ -28,6 +28,7 @@ pub struct AccountSummary {
     pub username: String,
     pub enabled: bool,
     pub verified: bool,
+    pub verification_failed: bool,
     pub active: bool,
 }
 

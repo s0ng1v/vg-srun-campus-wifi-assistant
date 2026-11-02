@@ -60,7 +60,7 @@ import {
 
 type Account = AccountSummary;
 type FormState = { mode: "add" | "edit"; id?: string; username: string; verified?: boolean };
-type BusyState = { kind: "login" | "switch"; accountId: string } | null;
+type BusyState = { kind: "login" | "switch" | "verify"; accountId: string } | null;
 type WindowSize = "compact" | "standard" | "large";
 type WindowRatio = "4:3" | "3:2" | "16:10" | "16:9";
 type WindowMetrics = { width: number; height: number };
@@ -76,8 +76,8 @@ const WINDOW_RATIOS = {
   "16:10": { label: "16:10", value: 16 / 10 },
   "16:9": { label: "16:9", value: 16 / 9 },
 } as const;
-const WINDOW_SIZE_KEY = "vg-campus-window-size";
-const WINDOW_RATIO_KEY = "vg-campus-window-ratio";
+const WINDOW_SIZE_KEY = "vg-campus-window-size-v2";
+const WINDOW_RATIO_KEY = "vg-campus-window-ratio-v2";
 const GUARD_INTENT_KEY = "vg-campus-guard-enabled";
 
 function readWindowSize(): WindowSize | null {
@@ -132,20 +132,12 @@ async function resolveWindowMetrics(size: WindowSize, ratio: WindowRatio): Promi
   }
 }
 
-async function chooseAdaptiveWindowSize(ratio: WindowRatio): Promise<WindowSize> {
-  const large = await resolveWindowMetrics("large", ratio);
-  if (large.height >= WINDOW_SIZES.large.height - 2) return "large";
-  const standard = await resolveWindowMetrics("standard", ratio);
-  if (standard.height >= WINDOW_SIZES.standard.height - 2) return "standard";
-  return "compact";
-}
-
 const INITIAL_ACCOUNTS: Account[] = [
-  { id: "primary", username: "student_01", enabled: true, verified: true, active: true },
-  { id: "backup", username: "backup_02", enabled: true, verified: true, active: false },
-  { id: "backup3", username: "backup_03", enabled: true, verified: false, active: false },
-  { id: "backup4", username: "backup_04", enabled: true, verified: true, active: false },
-  { id: "backup5", username: "backup_05", enabled: true, verified: true, active: false },
+  { id: "primary", username: "student_01", enabled: true, verified: true, verification_failed: false, active: true },
+  { id: "backup", username: "backup_02", enabled: true, verified: true, verification_failed: false, active: false },
+  { id: "backup3", username: "backup_03", enabled: true, verified: false, verification_failed: false, active: false },
+  { id: "backup4", username: "backup_04", enabled: true, verified: true, verification_failed: false, active: false },
+  { id: "backup5", username: "backup_05", enabled: true, verified: true, verification_failed: false, active: false },
 ];
 
 const NO_DRAG = { WebkitAppRegion: "no-drag" } as CSSProperties;
@@ -154,13 +146,13 @@ const START_STAGES = [
   { at: 620, label: "正在读取校园网账号" },
   { at: 1380, label: "正在登录校园网" },
   { at: 2100, label: "正在验证网络连接" },
-  { at: 2700, label: "网络守护已就绪" },
+  { at: 2700, label: "网络守护中" },
 ];
 const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.5",
+  daemon_version: "0.1.6",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -222,7 +214,7 @@ function phaseLabel(phase: GuardPhase): string {
     case "waiting_network": return "等待校园网连接";
     case "discovering_portal": return "正在识别校园网门户";
     case "authenticating": return "正在登录校园网";
-    case "online": return "网络守护已就绪";
+    case "online": return "网络守护中";
     case "suspicious": return "正在复核连接状态";
     case "reconnecting": return "正在恢复校园网连接";
     case "needs_action": return "需要处理";
@@ -362,7 +354,7 @@ function NetworkGuard({
       await action;
       if (progressFrame.current) cancelAnimationFrame(progressFrame.current);
       setProgress(100);
-      setStage("网络守护已就绪");
+      setStage("网络守护中");
       finishTimer.current = setTimeout(() => {
         setProgressClosing(true);
         finishTimer.current = setTimeout(() => {
@@ -386,7 +378,7 @@ function NetworkGuard({
     try {
       await onRepair();
       setProgress(100);
-      setStage("网络守护已就绪");
+      setStage("网络守护中");
     } catch (error) {
       setStarting(false);
       lensToast.error(error instanceof Error ? error.message : "重新启动网络守护失败");
@@ -431,13 +423,16 @@ function NetworkGuard({
             <p className="vg-guard-description">
               <span>网络守护会在开机时自动登录校园网</span>
               <span>持续监测连接 断线时自动重连</span>
-              <span>资源占用可忽略不计 关闭窗口不受影响</span>
+              <span>资源占用可忽略不计 关闭助手不受影响</span>
             </p>
             <div className="vg-resource-row" aria-label="守护进程资源占用">
               <span><Cpu /><span>CPU</span><strong className="vg-selectable">{enabled ? `${cpuPercent.toFixed(2)} %` : "—"}</strong></span>
               <span><MemoryStick /><span>内存</span><strong className="vg-selectable">{enabled && memoryBytes ? `${(memoryBytes / 1024 / 1024).toFixed(2)} MB` : "—"}</strong></span>
               <span className="vg-runtime-note">
-                <span className="vg-sample-note">{phaseLabel(phase)}</span>
+                <AnimatedSpan
+                  className="vg-sample-note"
+                  value={enabled ? "网络守护中" : "网络守护未开启"}
+                />
                 <span className="vg-process-name" title="可在任务管理器中搜索此进程名">vg-campus-daemon.exe</span>
               </span>
             </div>
@@ -470,8 +465,10 @@ function AccountRecord({
   index,
   count,
   loggingIn,
+  verifying,
   switchDisabled,
   onSwitch,
+  onVerify,
   onEdit,
   onMove,
   onToggle,
@@ -483,8 +480,10 @@ function AccountRecord({
   index: number;
   count: number;
   loggingIn: boolean;
+  verifying: boolean;
   switchDisabled: boolean;
   onSwitch: () => void;
+  onVerify: () => void;
   onEdit: () => void;
   onMove: (direction: number) => void;
   onToggle: () => void;
@@ -503,9 +502,21 @@ function AccountRecord({
       <span className="vg-account-copy">
         <strong>{account.username}</strong>
         {active ? <span className="vg-current-badge"><Check />当前</span> : null}
-        {!account.verified ? <span className="vg-pending-badge">未验证</span> : null}
+        {!account.verified ? (
+          <span className={account.verification_failed ? "vg-failed-badge" : "vg-pending-badge"}>
+            {account.verification_failed ? "验证失败" : "未验证"}
+          </span>
+        ) : null}
       </span>
       <span className="vg-account-action-cell">
+        {!account.verified && !active ? (
+          <LensActionButton
+            label={verifying ? "验证中" : "验证"}
+            className="vg-verify-account"
+            disabled={switchDisabled || !account.enabled}
+            onPress={onVerify}
+          />
+        ) : null}
         <LensChoiceAction
           label={loggingIn ? "连接中" : active ? (online ? "在线" : "当前") : "切换"}
           selected={active}
@@ -567,6 +578,17 @@ function AnimatedValue({ value, className }: { value: string; className?: string
   }, [value]);
 
   return <strong ref={ref} className={className}>{initial.current}</strong>;
+}
+
+function AnimatedSpan({ value, className }: { value: string; className?: string }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const initial = useRef(value);
+
+  useEffect(() => {
+    animateTextChange(ref.current, value);
+  }, [value]);
+
+  return <span ref={ref} className={className}>{initial.current}</span>;
 }
 
 function AccountDialog({
@@ -831,10 +853,10 @@ export default function LensOriginalApp() {
   const [portalOpen, setPortalOpen] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<Account | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [windowSize, setWindowSize] = useState<WindowSize>("compact");
-  const [windowRatio, setWindowRatio] = useState<WindowRatio>("16:10");
+  const [windowSize, setWindowSize] = useState<WindowSize>("standard");
+  const [windowRatio, setWindowRatio] = useState<WindowRatio>("3:2");
   const [windowMetrics, setWindowMetrics] = useState<WindowMetrics>(() => (
-    fitWindowMetrics("compact", "16:10")
+    fitWindowMetrics("standard", "3:2")
   ));
   const [homeView, setHomeView] = useState<"connection" | "detail">("connection");
   const [accountPage, setAccountPage] = useState(0);
@@ -890,8 +912,8 @@ export default function LensOriginalApp() {
     if (!isTauri()) return;
     let active = true;
     void (async () => {
-      const ratio = readWindowRatio() ?? "16:10";
-      const size = readWindowSize() ?? await chooseAdaptiveWindowSize(ratio);
+      const ratio = readWindowRatio() ?? "3:2";
+      const size = readWindowSize() ?? "standard";
       const metrics = await resolveWindowMetrics(size, ratio);
       if (!active) return;
       setWindowSize(size);
@@ -1048,13 +1070,13 @@ export default function LensOriginalApp() {
     if (!desktopApp) {
       if (form.mode === "edit" && form.id) {
         setAccounts(previous => previous.map(account => (
-          account.id === form.id ? { ...account, username, verified: false } : account
+          account.id === form.id ? { ...account, username, verified: false, verification_failed: false } : account
         )));
       } else {
         const id = crypto.randomUUID();
         setAccounts(previous => [
           ...previous,
-          { id, username, enabled: true, verified: false, active: previous.length === 0 },
+          { id, username, enabled: true, verified: false, verification_failed: false, active: previous.length === 0 },
         ]);
         if (!activeRef.current) setActiveId(id);
       }
@@ -1138,6 +1160,34 @@ export default function LensOriginalApp() {
       lensToast.success(`已切换到 ${account.username}`);
     } catch (error) {
       lensToast.error(error instanceof Error ? error.message : "账号切换失败");
+    } finally {
+      busyRef.current = null;
+      setBusy(null);
+    }
+  }
+
+  async function verifyAccount(account: Account) {
+    if (busyRef.current || !account.enabled || account.id === activeId) return;
+    if (!desktopApp) {
+      setAccounts(previous => previous.map(entry => (
+        entry.id === account.id ? { ...entry, verified: true, verification_failed: false } : entry
+      )));
+      lensToast.success(`${account.username} 验证成功`);
+      return;
+    }
+    const nextBusy: BusyState = { kind: "verify", accountId: account.id };
+    busyRef.current = nextBusy;
+    setBusy(nextBusy);
+    try {
+      const snapshot = await executeCommand({ type: "verify_account", id: account.id });
+      const verifiedAccount = snapshot.accounts.find(entry => entry.id === account.id);
+      if (verifiedAccount?.verified) {
+        lensToast.success(`${account.username} 验证成功，已恢复原账号`);
+      } else {
+        lensToast.error(`${account.username} 验证失败，请检查账号或密码；已恢复原账号`);
+      }
+    } catch (error) {
+      lensToast.error(error instanceof Error ? error.message : "账号验证失败");
     } finally {
       busyRef.current = null;
       setBusy(null);
@@ -1259,8 +1309,10 @@ export default function LensOriginalApp() {
                       icon="wifi"
                       checked={online}
                       onLabel={user?.username ? `${user.username} · 已登录校园网` : active ? `${active.username} · 已登录校园网` : "已登录校园网"}
-                      offLabel={busy ? (busy.kind === "switch" ? "正在切换账号" : "正在登录") : phaseLabel(phase)}
-                      className="vg-connection-tile"
+                      offLabel={busy
+                        ? (busy.kind === "switch" ? "正在切换账号" : busy.kind === "verify" ? "正在验证账号" : "正在登录")
+                        : !guard ? "未检测" : phaseLabel(phase)}
+                      className={cn("vg-connection-tile", busy && "is-busy")}
                       disabled
                       onChange={() => undefined}
                     />
@@ -1318,8 +1370,10 @@ export default function LensOriginalApp() {
                             index={index}
                             count={accounts.length}
                             loggingIn={busy?.accountId === account.id}
+                            verifying={busy?.kind === "verify" && busy.accountId === account.id}
                             switchDisabled={Boolean(busy)}
                             onSwitch={() => switchAccount(account)}
+                            onVerify={() => void verifyAccount(account)}
                             onEdit={() => setForm({ mode: "edit", id: account.id, username: account.username, verified: account.verified })}
                             onMove={direction => moveAccount(account.id, direction)}
                             onToggle={() => void toggleAccount(account)}
@@ -1371,7 +1425,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.5</b></span>
+          <span>VG校园网助手 <b>0.1.6</b></span>
         </footer>
       </div>
 
@@ -1487,7 +1541,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.5 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.6 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

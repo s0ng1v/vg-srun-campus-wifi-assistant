@@ -20,6 +20,8 @@ pub struct AccountMeta {
     pub username: String,
     pub enabled: bool,
     pub verified: bool,
+    #[serde(default)]
+    pub verification_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,12 +177,14 @@ mod tests {
                     username: "001".into(),
                     enabled: true,
                     verified: true,
+                    verification_failed: false,
                 },
                 AccountMeta {
                     id: "second".into(),
                     username: "002".into(),
                     enabled: true,
                     verified: false,
+                    verification_failed: true,
                 },
             ],
             ..AppConfig::default()
@@ -188,6 +192,7 @@ mod tests {
         save_config(&paths, &config).unwrap();
         let mut loaded = load_config(&paths).unwrap();
         assert_eq!(loaded.accounts[0].id, "first");
+        assert!(loaded.accounts[1].verification_failed);
         assert_eq!(loaded.active_account_id.as_deref(), Some("first"));
         loaded.guard_enabled = true;
         save_config(&paths, &loaded).unwrap();

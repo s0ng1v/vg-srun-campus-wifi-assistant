@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "VG校园网助手",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "io.github.v1gn0s.vg-campus-wifi-assistant",
   "build": {
     "beforeDevCommand": "npm run dev:renderer",
@@ -16,8 +16,8 @@
     "windows": [{
       "label": "main",
       "title": "VG校园网助手",
-      "width": 1080,
-      "height": 675,
+      "width": 1170,
+      "height": 780,
       "minWidth": 900,
       "minHeight": 600,
       "maxWidth": 1600,

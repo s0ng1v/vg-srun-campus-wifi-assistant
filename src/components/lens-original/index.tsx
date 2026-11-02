@@ -389,7 +389,7 @@ export function LensChoiceAction({
       button.disabled = disabled;
       button.setAttribute("aria-label", label);
       const text = button.querySelector("span");
-      if (text) text.textContent = label;
+      if (text) animateTextChange(text, label);
     }
   }, [disabled, label, selected]);
 

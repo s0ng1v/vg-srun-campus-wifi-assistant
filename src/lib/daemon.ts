@@ -17,6 +17,7 @@ export type AccountSummary = {
   username: string;
   enabled: boolean;
   verified: boolean;
+  verification_failed: boolean;
   active: boolean;
 };
 

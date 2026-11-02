@@ -249,12 +249,14 @@ impl GuardWorker {
             account.username = username;
             account.enabled = draft.enabled;
             account.verified = verified;
+            account.verification_failed = false;
         } else {
             self.config.accounts.push(AccountMeta {
                 id: id.clone(),
                 username,
                 enabled: draft.enabled,
                 verified: false,
+                verification_failed: false,
             });
         }
         if self.config.active_account_id.is_none() {
@@ -408,10 +410,19 @@ impl GuardWorker {
         &mut self,
         id: &str,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
-        if self.state.online && self.config.active_account_id.as_deref() != Some(id) {
-            return Err("请先停止或切换当前在线会话，再验证其他账号".into());
+        if let Some(last_switch) = self.last_switch_at {
+            let elapsed = last_switch.elapsed();
+            if elapsed < ACCOUNT_SWITCH_COOLDOWN {
+                tokio::time::sleep(ACCOUNT_SWITCH_COOLDOWN - elapsed).await;
+            }
         }
-        let record = self
+        self.last_switch_at = Some(Instant::now());
+        let previous_id = self.config.active_account_id.clone();
+        let previous_record = previous_id
+            .as_deref()
+            .and_then(|account_id| self.vault.get(account_id))
+            .cloned();
+        let target = self
             .vault
             .get(id)
             .cloned()
@@ -419,28 +430,121 @@ impl GuardWorker {
         let client = self
             .cached_client()
             .map_err(|error| safe_error_ref(&error))?;
-        self.state.phase = GuardPhase::Authenticating;
-        match client
-            .login(&SrunAccount {
-                username: record.username,
-                password: record.password,
-            })
+        self.state.phase = GuardPhase::Reconnecting;
+
+        let current_probe = match client
+            .get_user_info_best_effort(Duration::from_secs(2))
             .await
         {
+            Ok(info) => info,
+            Err(error) => return Err(self.fail_switch(&error)),
+        };
+        let current = if current_probe.is_rate_limited() {
+            self.known_session_info(current_probe.client_ip())
+        } else {
+            Some(current_probe)
+        };
+        let known_ip = current
+            .as_ref()
+            .and_then(|info| info.client_ip())
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(current_info) = current.as_ref().filter(|info| info.is_online()) {
+            if let Err(error) = client.logout(current_info).await {
+                return Err(self.fail_switch(&error));
+            }
+            self.state.online = false;
+            self.state.user = None;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+
+        let target_login = if known_ip.is_empty() {
+            client
+                .login(&SrunAccount {
+                    username: target.username,
+                    password: target.password,
+                })
+                .await
+        } else {
+            client
+                .login_after_logout(
+                    &SrunAccount {
+                        username: target.username,
+                        password: target.password,
+                    },
+                    &known_ip,
+                )
+                .await
+        };
+        let verified_info = match target_login {
             Ok(info) => {
                 self.mark_verified(id);
+                Some(info)
+            }
+            Err(error) => {
+                logging::warn(format!("账号验证失败：{}", safe_error_ref(&error)));
+                self.mark_verification_failed(id);
+                None
+            }
+        };
+
+        if let Some(info) = &verified_info {
+            if let Err(error) = client.logout(info).await {
                 self.save_config()?;
-                self.set_online(id, info).await;
+                return Err(self.fail_switch(&error));
+            }
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+        }
+
+        let Some(previous_id) = previous_id else {
+            self.state.phase = GuardPhase::NeedsAction;
+            self.state.last_error = Some("账号已验证，但没有可恢复的原账号".into());
+            self.save_config()?;
+            fill_config_snapshot(&mut self.state, &self.config);
+            return Ok(Some(self.state.clone()));
+        };
+        let Some(previous) = previous_record else {
+            self.state.phase = GuardPhase::NeedsAction;
+            self.state.last_error = Some("账号已验证，但原账号凭据缺失".into());
+            self.save_config()?;
+            fill_config_snapshot(&mut self.state, &self.config);
+            return Ok(Some(self.state.clone()));
+        };
+
+        let restore_login = if known_ip.is_empty() {
+            client
+                .login(&SrunAccount {
+                    username: previous.username,
+                    password: previous.password,
+                })
+                .await
+        } else {
+            client
+                .login_after_logout(
+                    &SrunAccount {
+                        username: previous.username,
+                        password: previous.password,
+                    },
+                    &known_ip,
+                )
+                .await
+        };
+        match restore_login {
+            Ok(info) => {
+                self.config.active_account_id = Some(previous_id.clone());
+                self.save_config()?;
+                fill_config_snapshot(&mut self.state, &self.config);
+                self.set_online(&previous_id, info).await;
                 Ok(Some(self.state.clone()))
             }
             Err(error) => {
-                self.set_error(&error);
-                self.state.phase = if self.config.guard_enabled {
-                    GuardPhase::NeedsAction
-                } else {
-                    GuardPhase::Off
-                };
-                Err(safe_error(error))
+                self.state.phase = GuardPhase::NeedsAction;
+                self.save_config()?;
+                fill_config_snapshot(&mut self.state, &self.config);
+                Err(format!(
+                    "验证完成，但恢复原账号失败：{}",
+                    safe_error_ref(&error)
+                ))
             }
         }
     }
@@ -507,6 +611,9 @@ impl GuardWorker {
         };
         match target_login {
             Ok(info) => {
+                let info = self
+                    .refresh_session_info(&client, &target_account, info)
+                    .await;
                 self.config.active_account_id = Some(id.to_owned());
                 self.mark_verified(id);
                 self.save_config()?;
@@ -514,6 +621,7 @@ impl GuardWorker {
                 Ok(Some(self.state.clone()))
             }
             Err(target_error) => {
+                self.mark_verification_failed(id);
                 if let Some(old) = old_record {
                     let restored = client
                         .login(&SrunAccount {
@@ -527,9 +635,11 @@ impl GuardWorker {
                         self.set_online(id, info).await;
                     }
                 }
+                let _ = self.save_config();
+                fill_config_snapshot(&mut self.state, &self.config);
                 self.set_error(&target_error);
                 let message = format!(
-                    "目标账号切换失败，已尝试恢复原账号：{}",
+                    "目标账号切换失败，请检查目标账号或密码是否正确；已尝试恢复原账号：{}",
                     safe_error(target_error)
                 );
                 self.state.phase = if self.state.online {
@@ -763,6 +873,7 @@ impl GuardWorker {
         self.state.online = true;
         self.state.active_account_id = (!account_id.is_empty()).then(|| account_id.to_owned());
         self.state.user = Some(user_snapshot(&info, &self.config));
+        self.state.last_check_at = Some(now_string());
         self.state.last_error = None;
         self.state.next_retry_at = None;
         if let Some(portal) = &self.config.portal {
@@ -783,6 +894,19 @@ impl GuardWorker {
             .find(|account| account.id == id)
         {
             account.verified = true;
+            account.verification_failed = false;
+        }
+    }
+
+    fn mark_verification_failed(&mut self, id: &str) {
+        if let Some(account) = self
+            .config
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == id)
+        {
+            account.verified = false;
+            account.verification_failed = true;
         }
     }
 
@@ -905,6 +1029,37 @@ impl GuardWorker {
         safe_error_ref(error)
     }
 
+    async fn refresh_session_info(
+        &self,
+        client: &PortalClient,
+        account: &SrunAccount,
+        fallback: UserInfo,
+    ) -> UserInfo {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let expected = build_username(
+            &account.username,
+            self.config
+                .portal
+                .as_ref()
+                .map(|portal| portal.domain.as_str())
+                .unwrap_or_default(),
+        );
+        match client
+            .get_user_info_best_effort(Duration::from_secs(2))
+            .await
+        {
+            Ok(info)
+                if info.is_online()
+                    && info
+                        .display_username()
+                        .is_some_and(|actual| same_portal_identity(actual, &expected)) =>
+            {
+                info
+            }
+            _ => fallback,
+        }
+    }
+
     fn cached_client(&mut self) -> std::result::Result<PortalClient, SrunError> {
         let profile = self
             .config
@@ -951,6 +1106,7 @@ fn fill_config_snapshot(snapshot: &mut DaemonSnapshot, config: &AppConfig) {
             username: account.username.clone(),
             enabled: account.enabled,
             verified: account.verified,
+            verification_failed: account.verification_failed,
             active: config.active_account_id.as_deref() == Some(account.id.as_str()),
         })
         .collect();
