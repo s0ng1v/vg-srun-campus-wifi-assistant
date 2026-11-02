@@ -4,16 +4,21 @@
   "description": "A lightweight Srun campus Wi-Fi assistant for Windows.",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev": "tauri dev",
+    "predev": "cargo build -p srun-daemon -p srun-notifier -p srun-setup",
     "dev:renderer": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build:renderer": "tsc --noEmit && vite build",
-    "build": "tauri build --no-bundle --ignore-version-mismatches",
+    "build:sidecars": "cargo build --release -p srun-daemon -p srun-notifier -p srun-setup",
+    "build": "npm run build:sidecars && tauri build --no-bundle",
     "tauri": "tauri",
     "check:lens": "node tools/verify-lens.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/api": "2.12.4",
     "clsx": "2.1.1",
     "lucide-react": "0.542.0",
     "react": "18.3.1",
@@ -21,12 +26,12 @@
     "tailwind-merge": "3.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.10.1",
+    "@tauri-apps/cli": "2.12.4",
     "@types/node": "^20.0.0",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
     "@vitejs/plugin-react": "4.7.0",
     "typescript": "5.9.3",
-    "vite": "7.3.0"
+    "vite": "7.3.7"
   }
 }

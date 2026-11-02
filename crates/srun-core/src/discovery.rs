@@ -69,6 +69,59 @@ pub fn portal_profile_from_login_url(input: &str) -> Result<PortalProfile, SrunE
     Ok(profile)
 }
 
+pub async fn enrich_portal_profile(mut profile: PortalProfile) -> PortalProfile {
+    let Ok(base) = profile.validate() else {
+        return profile;
+    };
+    let Ok(client) = Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(8))
+        .build()
+    else {
+        return profile;
+    };
+    let Ok(mut page_url) = base.join("/srun_portal_pc") else {
+        return profile;
+    };
+    page_url.set_query(Some(&format!("ac_id={}&theme=pro", profile.ac_id)));
+    let Ok(response) = client.get(page_url.clone()).send().await else {
+        return profile;
+    };
+    let Ok(page) = response.text().await else {
+        return profile;
+    };
+    if let Some(domain) = extract_portal_domain(&page) {
+        profile.domain = domain;
+        return profile;
+    }
+
+    let Ok(script_regex) = Regex::new(r#"(?i)<script[^>]+src=["']([^"']+)["']"#) else {
+        return profile;
+    };
+    for captures in script_regex.captures_iter(&page).take(20) {
+        let Some(source) = captures.get(1).map(|value| value.as_str()) else {
+            continue;
+        };
+        let Ok(url) = page_url.join(source) else {
+            continue;
+        };
+        if url.scheme() != "https" || url.host_str() != base.host_str() {
+            continue;
+        }
+        let Ok(response) = client.get(url).send().await else {
+            continue;
+        };
+        let Ok(script) = response.text().await else {
+            continue;
+        };
+        if let Some(domain) = extract_portal_domain(&script) {
+            profile.domain = domain;
+            break;
+        }
+    }
+    profile
+}
+
 pub fn extract_portal_domain(source: &str) -> Option<String> {
     let patterns = [
         r#"(?i)domain\s*[:=]\s*["']([^"']+)["']"#,
@@ -104,5 +157,14 @@ mod tests {
             extract_portal_domain(r#"var config = {"domain": "@campus"};"#),
             Some("@campus".into())
         );
+    }
+
+    #[test]
+    fn extracts_script_sources_only_from_page_markup() {
+        let regex = Regex::new(r#"(?i)<script[^>]+src=["']([^"']+)["']"#).unwrap();
+        let captures = regex
+            .captures(r#"<script src="./static/Portal.js?v=1"></script>"#)
+            .unwrap();
+        assert_eq!(&captures[1], "./static/Portal.js?v=1");
     }
 }

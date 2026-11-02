@@ -4,6 +4,7 @@
 
 ```powershell
 npm ci
+npm audit --audit-level=high
 npm run check:lens
 npm run build:renderer
 cargo fmt --all -- --check

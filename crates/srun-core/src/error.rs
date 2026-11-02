@@ -18,7 +18,10 @@ impl LoginFailureKind {
     pub fn should_try_next_account(self) -> bool {
         matches!(
             self,
-            Self::InvalidCredentials | Self::AccountUnavailable | Self::Unknown
+            Self::InvalidCredentials
+                | Self::AccountUnavailable
+                | Self::BalanceInsufficient
+                | Self::DeviceLimit
         )
     }
 

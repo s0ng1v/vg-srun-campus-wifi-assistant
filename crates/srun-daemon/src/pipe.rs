@@ -8,17 +8,25 @@ use tokio::{
 };
 
 use crate::logging;
+use crate::security::PipeSecurity;
 use crate::service::DaemonService;
 
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-pub async fn serve(service: Arc<DaemonService>) -> Result<()> {
+pub async fn serve(service: Arc<DaemonService>, owner_sid: String) -> Result<()> {
+    let mut first_instance = true;
     loop {
-        let server = ServerOptions::new()
-            .first_pipe_instance(false)
-            .create(PIPE_NAME)
-            .with_context(|| format!("无法创建命名管道 {PIPE_NAME}"))?;
+        let server = {
+            let mut security = PipeSecurity::for_owner(&owner_sid)?;
+            unsafe {
+                ServerOptions::new()
+                    .first_pipe_instance(first_instance)
+                    .create_with_security_attributes_raw(PIPE_NAME, security.attributes_ptr())
+            }
+        }
+        .with_context(|| format!("无法创建命名管道 {PIPE_NAME}"))?;
+        first_instance = false;
         server.connect().await.context("命名管道客户端连接失败")?;
         let service = Arc::clone(&service);
         tokio::spawn(async move {

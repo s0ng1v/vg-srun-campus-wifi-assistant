@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -203,12 +203,15 @@ impl PortalClient {
 }
 
 pub async fn probe_external() -> ExternalProbe {
-    let Ok(client) = Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    else {
+    static CLIENT: OnceLock<Option<Client>> = OnceLock::new();
+    let Some(client) = CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok()
+    }) else {
         return ExternalProbe::Unreachable;
     };
 
@@ -220,6 +223,9 @@ pub async fn probe_external() -> ExternalProbe {
 
 fn parse_jsonp(input: &str) -> Result<Value, SrunError> {
     let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("ok") {
+        return Ok(serde_json::json!({ "error": "ok" }));
+    }
     if trimmed.starts_with('{') {
         return serde_json::from_str(trimmed)
             .map_err(|error| SrunError::InvalidResponse(error.to_string()));
@@ -272,6 +278,7 @@ mod tests {
         let value = parse_jsonp("jQuery_1({\"error\":\"ok\",\"uid\":\"7\"})").unwrap();
         assert_eq!(value["error"], "ok");
         assert_eq!(parse_jsonp("{\"error\":\"ok\"}").unwrap()["error"], "ok");
+        assert_eq!(parse_jsonp("ok").unwrap()["error"], "ok");
     }
 
     #[test]

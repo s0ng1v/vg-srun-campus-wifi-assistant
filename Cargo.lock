@@ -3497,6 +3497,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "srun-notifier"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "winreg",
+]
+
+[[package]]
+name = "srun-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "srun-ipc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

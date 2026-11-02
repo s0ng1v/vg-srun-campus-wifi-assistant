@@ -7,6 +7,7 @@
 1. `vg-campus-wifi-assistant.exe`：Tauri GUI，只负责交互和状态展示。
 2. `vg-campus-daemon.exe`：无界面守护进程，由开机任务以 SYSTEM 身份启动。
 3. `vg-campus-notifier.exe`：按需启动的短生命周期通知进程。
+4. `vg-campus-setup.exe`：注册/移除开机任务、通知任务和 URL 协议。
 
 GUI 退出不会停止守护。GUI 通过本地命名管道查询状态和发送控制命令。
 
@@ -26,6 +27,9 @@ GUI 退出不会停止守护。GUI 通过本地命名管道查询状态和发送
 ## 本地安全边界
 
 - 系统任务固定指向受保护安装目录中的守护可执行文件。
+- 首次启用时，setup helper 会先把 GUI、守护、通知和卸载工具复制到
+  `C:\Program Files\VGCampusWifiAssistant\app-<version>\`，再注册任务；不会让
+  SYSTEM 任务执行用户可写目录中的程序。
 - 凭据使用机器级 Windows DPAPI 加密，只允许 SYSTEM、管理员和所有者读取。
 - 命名管道通过所有者 SID、SYSTEM 和管理员 ACL 限制访问。
 - GUI 无法读取已保存的明文密码；账号验证由守护进程完成。
@@ -43,4 +47,14 @@ C:\ProgramData\VGCampusWifiAssistant\
 ```
 
 安装、卸载和升级均不得把运行时数据提交到 Git 仓库。
+
+## 开机与关闭语义
+
+系统任务始终以 SYSTEM 身份调用 `vg-campus-daemon.exe --onstart`。用户关闭网络
+守护后，配置会立即写入禁用状态，当前守护进程随后退出；即使电脑重启，任务也会
+读取到禁用状态并立刻结束，不保留网络守护进程。再次在 GUI 开启时重新启动守护，
+无需再次注册系统任务。
+
+通知任务以所有者用户的交互令牌按需运行。守护进程只写入固定的通知事件码并触发
+任务，通知 helper 读取事件码后在用户桌面显示 Toast，然后退出。
 

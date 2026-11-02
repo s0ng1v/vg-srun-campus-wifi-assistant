@@ -60,7 +60,6 @@ export type DaemonSnapshot = {
   last_check_at: string | null;
   next_retry_at: string | null;
   last_error: string | null;
-  restart_required: boolean;
 };
 
 export type AccountDraft = {
@@ -75,6 +74,7 @@ export type DaemonCommand =
   | { type: "get_snapshot" }
   | { type: "set_guard"; enabled: boolean }
   | { type: "set_auto_start"; enabled: boolean }
+  | { type: "shutdown" }
   | { type: "check_now" }
   | { type: "switch_account"; id: string }
   | { type: "verify_account"; id: string }
@@ -82,8 +82,7 @@ export type DaemonCommand =
   | { type: "remove_account"; id: string }
   | { type: "set_account_enabled"; id: string; enabled: boolean }
   | { type: "reorder_accounts"; ids: string[] }
-  | { type: "set_portal"; portal_url: string }
-  | { type: "clear_diagnostics" };
+  | { type: "set_portal"; portal_url: string };
 
 type CommandResponse = {
   protocol_version: number;
@@ -113,8 +112,20 @@ export async function startDaemon(): Promise<void> {
   await invoke("start_daemon");
 }
 
+export async function installSystemIntegration(): Promise<void> {
+  await invoke("install_system_integration");
+}
+
 export async function discoverPortal(): Promise<DiscoveredPortal> {
   return invoke<DiscoveredPortal>("discover_portal");
+}
+
+export async function openDiagnostics(): Promise<void> {
+  await invoke("open_diagnostics");
+}
+
+export async function openReleasePage(): Promise<void> {
+  await invoke("open_release_page");
 }
 
 export function isDesktopApp(): boolean {

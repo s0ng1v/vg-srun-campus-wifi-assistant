@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\VGCampusWifiAssistant.v1";
 pub const PROTOCOL_VERSION: u16 = 1;
+pub const DAEMON_TASK_NAME: &str = "VGCampusWifiAssistantDaemon";
+pub const NOTIFIER_TASK_NAME: &str = "VGCampusWifiAssistantNotifier";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,7 +74,6 @@ pub struct DaemonSnapshot {
     pub last_check_at: Option<String>,
     pub next_retry_at: Option<String>,
     pub last_error: Option<String>,
-    pub restart_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +91,7 @@ pub enum DaemonCommand {
     GetSnapshot,
     SetGuard { enabled: bool },
     SetAutoStart { enabled: bool },
+    Shutdown,
     CheckNow,
     SwitchAccount { id: String },
     VerifyAccount { id: String },
@@ -98,7 +100,6 @@ pub enum DaemonCommand {
     SetAccountEnabled { id: String, enabled: bool },
     ReorderAccounts { ids: Vec<String> },
     SetPortal { portal_url: String },
-    ClearDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

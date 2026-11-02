@@ -5,7 +5,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -45,7 +45,10 @@ import { cn } from "@/lib/utils";
 import {
   discoverPortal,
   getDaemonSnapshot,
+  installSystemIntegration,
   isDesktopApp,
+  openDiagnostics,
+  openReleasePage,
   sendDaemonCommand,
   startDaemon,
   type AccountDraft,
@@ -75,6 +78,7 @@ const WINDOW_RATIOS = {
 } as const;
 const WINDOW_SIZE_KEY = "vg-campus-window-size";
 const WINDOW_RATIO_KEY = "vg-campus-window-ratio";
+const GUARD_INTENT_KEY = "vg-campus-guard-enabled";
 
 function readWindowSize(): WindowSize | null {
   try {
@@ -188,7 +192,6 @@ const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   last_check_at: "2026-10-30T10:42:16Z",
   next_retry_at: null,
   last_error: null,
-  restart_required: false,
 };
 
 const EMPTY_SNAPSHOT: DaemonSnapshot = {
@@ -267,7 +270,7 @@ function WindowControls() {
   return (
     <div className="vg-window-controls">
       <LensActionButton label="−" className="vg-window-control" ariaLabel="最小化窗口" onPress={() => void run(() => getCurrentWindow().minimize())} />
-      <LensActionButton label="×" className="vg-window-control is-close" ariaLabel="关闭窗口" onPress={() => void run(() => getCurrentWindow().close())} />
+      <LensActionButton label="×" className="vg-window-control is-close" ariaLabel="关闭窗口" onPress={() => void run(() => invoke("exit_app"))} />
     </div>
   );
 }
@@ -297,12 +300,14 @@ function NetworkGuard({
   cpuPercent,
   memoryBytes,
   onChange,
+  onRepair,
 }: {
   enabled: boolean;
   phase: GuardPhase;
   cpuPercent: number;
   memoryBytes: number;
   onChange: (enabled: boolean) => Promise<void>;
+  onRepair: () => Promise<void>;
 }) {
   const [starting, setStarting] = useState(false);
   const [progressClosing, setProgressClosing] = useState(false);
@@ -373,6 +378,26 @@ function NetworkGuard({
     }
   }
 
+  async function repair() {
+    if (starting) return;
+    setStarting(true);
+    setProgress(12);
+    setStage("正在重新启动网络守护");
+    try {
+      await onRepair();
+      setProgress(100);
+      setStage("网络守护已就绪");
+    } catch (error) {
+      setStarting(false);
+      lensToast.error(error instanceof Error ? error.message : "重新启动网络守护失败");
+      return;
+    }
+    finishTimer.current = setTimeout(() => {
+      setStarting(false);
+      setProgressClosing(false);
+    }, 600);
+  }
+
   return (
     <LensPanel label="网络守护" className="vg-panel vg-guard-panel">
       <div className="vg-guard-copy">
@@ -417,6 +442,13 @@ function NetworkGuard({
         )}
       </div>
       <div className="vg-guard-control">
+        {phase === "crashed" && !starting ? (
+          <LensActionButton
+            label="重新启动"
+            className="vg-quiet-button"
+            onPress={() => void repair()}
+          />
+        ) : null}
         <LensSwitch
           label="网络守护"
           checked={enabled || starting}
@@ -819,7 +851,17 @@ export default function LensOriginalApp() {
         const snapshot = await getDaemonSnapshot();
         if (!disposed) applySnapshot(snapshot);
       } catch {
-        if (!disposed) setDaemonConnected(false);
+        if (!disposed) {
+          setDaemonConnected(false);
+          try {
+            if (localStorage.getItem(GUARD_INTENT_KEY) === "true") {
+              setGuard(true);
+              setPhase("crashed");
+            }
+          } catch {
+            // State persistence is optional in restricted previews.
+          }
+        }
       }
     }
     void refresh();
@@ -913,6 +955,11 @@ export default function LensOriginalApp() {
     setLastError(snapshot.last_error);
     setDaemonConnected(true);
     onlineRef.current = snapshot.online;
+    try {
+      localStorage.setItem(GUARD_INTENT_KEY, String(snapshot.guard_enabled));
+    } catch {
+      // State persistence is optional in restricted previews.
+    }
   }
 
   async function executeCommand(command: DaemonCommand): Promise<DaemonSnapshot> {
@@ -941,7 +988,7 @@ export default function LensOriginalApp() {
         throw new Error("请先完成校园网门户配置");
       }
       if (next && snapshot.accounts.length === 0) {
-        setForm({ mode: "add", username: "" });
+        setForm({ mode: "add", id: crypto.randomUUID(), username: "" });
         throw new Error("请先添加校园网登录账号");
       }
       if (next) {
@@ -951,13 +998,32 @@ export default function LensOriginalApp() {
           await executeCommand({ type: "verify_account", id: candidate.id });
         }
       }
+      if (next && !snapshot.auto_start_enabled) {
+        lensToast.info("首次开启需要在 Windows 权限提示中允许注册开机守护");
+        await installSystemIntegration();
+        applySnapshot(await getDaemonSnapshot());
+      }
       await executeCommand({ type: "set_guard", enabled: next });
+      if (!next) {
+        await executeCommand({ type: "shutdown" });
+        setDaemonConnected(false);
+      }
+      try {
+        localStorage.setItem(GUARD_INTENT_KEY, String(next));
+      } catch {
+        // State persistence is optional in restricted previews.
+      }
       lensToast.success(next ? "网络守护已启动" : "网络守护已关闭");
     } catch (error) {
       const message = error instanceof Error ? error.message : "校园网守护操作失败";
       setLastError(message);
       throw error;
     }
+  }
+
+  async function repairGuard() {
+    await handleGuardChange(false);
+    await handleGuardChange(true);
   }
 
   async function handleAccountSave(username: string, password: string) {
@@ -982,7 +1048,7 @@ export default function LensOriginalApp() {
 
     await startDaemon();
     const account: AccountDraft = {
-      id: form.mode === "edit" ? form.id : crypto.randomUUID(),
+      id: form.id ?? crypto.randomUUID(),
       username,
       password: password || undefined,
       enabled: form.mode === "edit"
@@ -998,7 +1064,9 @@ export default function LensOriginalApp() {
     setPortalOpen(false);
     void getDaemonSnapshot().then(applySnapshot).catch(() => undefined);
     lensToast.success("校园网门户已保存");
-    if (accounts.length === 0) setForm({ mode: "add", username: "" });
+    if (accounts.length === 0) {
+      setForm({ mode: "add", id: crypto.randomUUID(), username: "" });
+    }
   }
 
   async function changeWindowLayout(size: WindowSize, ratio: WindowRatio) {
@@ -1153,6 +1221,7 @@ export default function LensOriginalApp() {
                 cpuPercent={metrics.process_cpu_percent}
                 memoryBytes={metrics.process_memory_bytes}
                 onChange={handleGuardChange}
+                onRepair={repairGuard}
               />
 
               <div className="vg-home-grid">
@@ -1212,7 +1281,7 @@ export default function LensOriginalApp() {
                       label="＋ 添加账号"
                       variant="success"
                       className="vg-add-account"
-                      onPress={() => setForm({ mode: "add", username: "" })}
+                      onPress={() => setForm({ mode: "add", id: crypto.randomUUID(), username: "" })}
                     />
                   </div>
                   <div
@@ -1377,6 +1446,31 @@ export default function LensOriginalApp() {
               </div>
             </div>
           ) : null}
+          <div className="vg-setting-row">
+            <div>
+              <strong>运行记录</strong>
+              <span>只保留状态变化和错误，日志内容已脱敏</span>
+            </div>
+            <LensActionButton
+              label="打开日志目录"
+              className="vg-quiet-button"
+              disabled={!desktopApp}
+              onPress={() => void openDiagnostics().catch(() => lensToast.error("无法打开日志目录"))}
+            />
+          </div>
+          <div className="vg-setting-divider" />
+          <div className="vg-setting-row">
+            <div>
+              <strong>版本更新</strong>
+              <span>当前版本 0.1.0 · 不进行后台更新检查</span>
+            </div>
+            <LensActionButton
+              label="查看新版本"
+              className="vg-quiet-button"
+              disabled={!desktopApp}
+              onPress={() => void openReleasePage().catch(() => lensToast.error("无法打开 Releases 页面"))}
+            />
+          </div>
           <div className="vg-setting-divider" />
           <div className="vg-system-credit">
             <div><strong>Lens Design System</strong><span>原始组件 · WebGL 折射 · 弹性与交互音效</span></div>

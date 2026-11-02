@@ -3,7 +3,8 @@
 VG 校园网助手是一个面向 Windows 10/11 的深澜 Web Portal 自动认证工具。
 它在电脑启动后保持一个轻量的本地守护进程，负责检测连接、自动登录和断线恢复。
 
-当前状态：开发中。认证流程目前只在长安大学门户完成真实环境验证。
+当前状态：开发中。桌面端、Rust 认证核心、守护进程、本地 IPC、系统任务安装器
+和 Windows 通知 helper 已经接通；认证流程目前只在长安大学门户完成真实环境验证。
 
 ## 当前范围
 
@@ -14,6 +15,7 @@ VG 校园网助手是一个面向 Windows 10/11 的深澜 Web Portal 自动认�
 - Windows 登录前自动运行
 - GUI 完全退出后继续守护
 - 本地加密保存凭据，无遥测
+- 状态变化与持续断网通知
 
 暂不支持 802.1X、PPPoE、验证码、短信验证和多学校门户并存。
 
@@ -28,6 +30,36 @@ VG 校园网助手是一个面向 Windows 10/11 的深澜 Web Portal 自动认�
 npm install
 npm run dev
 ```
+
+生产构建：
+
+```powershell
+npm ci
+npm run build
+```
+
+构建会在 `target/release/` 生成：
+
+- `vg-campus-assistant.exe`
+- `vg-campus-daemon.exe`
+- `vg-campus-notifier.exe`
+- `vg-campus-setup.exe`
+
+源码阶段首次开启守护时会请求一次管理员权限，由 setup helper 注册开机任务和
+用户会话通知任务，并把运行文件复制到 Program Files 的受保护目录。正式
+Setup.exe 安装器仍在后续里程碑中。
+
+## 验证
+
+```powershell
+npm run check:lens
+npm run build:renderer
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+真实网络验收步骤见 `docs/ACCEPTANCE.md`。其他学校必须经过自己的门户测试后才能
+加入兼容列表。
 
 ## 安全说明
 

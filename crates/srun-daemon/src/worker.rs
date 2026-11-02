@@ -3,8 +3,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 use srun_core::{
-    portal_profile_from_login_url, probe_external, ExternalProbe, LoginFailureKind, PortalClient,
-    SrunAccount, SrunError, UserInfo,
+    enrich_portal_profile, portal_profile_from_login_url, probe_external, ExternalProbe,
+    LoginFailureKind, PortalClient, SrunAccount, SrunError, UserInfo,
 };
 use srun_ipc::{
     AccountDraft, AccountSummary, DaemonCommand, DaemonSnapshot, GuardPhase, PortalSnapshot,
@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::config::{load_config, save_config, AccountMeta, AppConfig, AppPaths};
 use crate::logging;
+use crate::notify::{self, NotificationEvent};
 use crate::state::{replace_snapshot, SharedSnapshot, WorkerRequest};
 use crate::vault::{CredentialRecord, CredentialVault};
 
@@ -47,6 +48,10 @@ pub struct GuardWorker {
     failure_count: u32,
     network_backoff_step: usize,
     account_backoff_step: usize,
+    outage_started: Option<Instant>,
+    outage_notified: bool,
+    action_notification: Option<String>,
+    portal_client: Option<(srun_core::PortalProfile, PortalClient)>,
 }
 
 impl GuardWorker {
@@ -75,10 +80,18 @@ impl GuardWorker {
             failure_count: 0,
             network_backoff_step: 0,
             account_backoff_step: 0,
+            outage_started: None,
+            outage_notified: false,
+            action_notification: None,
+            portal_client: None,
         })
     }
 
-    pub async fn run(mut self, mut receiver: mpsc::Receiver<WorkerRequest>) {
+    pub async fn run(
+        mut self,
+        mut receiver: mpsc::Receiver<WorkerRequest>,
+        mut network_events: mpsc::UnboundedReceiver<()>,
+    ) {
         self.publish().await;
         loop {
             let deadline = self
@@ -89,9 +102,13 @@ impl GuardWorker {
                     let Some(request) = maybe_request else {
                         break;
                     };
+                    let should_shutdown = matches!(request.command, DaemonCommand::Shutdown);
                     let result = self.handle_command(request.command).await;
                     let _ = request.reply.send(result);
                     self.publish().await;
+                    if should_shutdown {
+                        break;
+                    }
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     if self.config.guard_enabled {
@@ -99,6 +116,11 @@ impl GuardWorker {
                         self.publish().await;
                     } else {
                         self.next_check = None;
+                    }
+                }
+                event = network_events.recv() => {
+                    if event.is_some() && self.config.guard_enabled {
+                        self.next_check = Some(Instant::now());
                     }
                 }
             }
@@ -117,6 +139,15 @@ impl GuardWorker {
                 self.state.auto_start_enabled = enabled;
                 Ok(Some(self.state.clone()))
             }
+            DaemonCommand::Shutdown => {
+                self.config.guard_enabled = false;
+                self.save_config()?;
+                self.state.guard_enabled = false;
+                self.state.online = false;
+                self.state.phase = GuardPhase::Off;
+                self.next_check = None;
+                Ok(Some(self.state.clone()))
+            }
             DaemonCommand::CheckNow => {
                 if !self.config.guard_enabled {
                     return Err("网络守护当前已关闭".into());
@@ -133,11 +164,7 @@ impl GuardWorker {
                 self.set_account_enabled(&id, enabled)
             }
             DaemonCommand::ReorderAccounts { ids } => self.reorder_accounts(&ids),
-            DaemonCommand::SetPortal { portal_url } => self.set_portal(&portal_url),
-            DaemonCommand::ClearDiagnostics => {
-                self.state.last_error = None;
-                Ok(Some(self.state.clone()))
-            }
+            DaemonCommand::SetPortal { portal_url } => self.set_portal(&portal_url).await,
             DaemonCommand::Ping | DaemonCommand::GetSnapshot => Ok(Some(self.state.clone())),
         }
     }
@@ -153,13 +180,14 @@ impl GuardWorker {
             return Err("请先添加可用账号".into());
         }
         self.config.guard_enabled = enabled;
-        self.config.auto_start_enabled = enabled;
         self.save_config()?;
         self.state.guard_enabled = enabled;
-        self.state.auto_start_enabled = enabled;
         self.failure_count = 0;
         self.network_backoff_step = 0;
         self.account_backoff_step = 0;
+        self.outage_started = None;
+        self.outage_notified = false;
+        self.action_notification = None;
         if enabled {
             self.state.phase = GuardPhase::Starting;
             self.state.last_error = None;
@@ -183,6 +211,10 @@ impl GuardWorker {
         }
         let id = draft.id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let existing = self.config.accounts.iter().find(|account| account.id == id);
+        let password_was_changed = draft
+            .password
+            .as_deref()
+            .is_some_and(|password| !password.is_empty());
         let password = match draft.password {
             Some(password) if !password.is_empty() => password,
             _ => self
@@ -191,8 +223,8 @@ impl GuardWorker {
                 .map(|record| record.password.clone())
                 .ok_or_else(|| "新账号必须填写密码".to_string())?,
         };
-        let verified =
-            existing.is_some_and(|account| account.username == username && account.verified);
+        let verified = !password_was_changed
+            && existing.is_some_and(|account| account.username == username && account.verified);
         self.vault
             .upsert(CredentialRecord {
                 id: id.clone(),
@@ -294,13 +326,16 @@ impl GuardWorker {
         Ok(Some(self.state.clone()))
     }
 
-    fn set_portal(
+    async fn set_portal(
         &mut self,
         portal_url: &str,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
-        let profile = portal_profile_from_login_url(portal_url).map_err(safe_error)?;
+        let profile =
+            enrich_portal_profile(portal_profile_from_login_url(portal_url).map_err(safe_error)?)
+                .await;
         profile.validate().map_err(|error| error.to_string())?;
         self.config.portal = Some(profile);
+        self.portal_client = None;
         self.save_config()?;
         fill_config_snapshot(&mut self.state, &self.config);
         Ok(Some(self.state.clone()))
@@ -313,17 +348,14 @@ impl GuardWorker {
         if self.state.online && self.config.active_account_id.as_deref() != Some(id) {
             return Err("请先停止或切换当前在线会话，再验证其他账号".into());
         }
-        let profile = self
-            .config
-            .portal
-            .clone()
-            .ok_or_else(|| "尚未配置校园网门户".to_string())?;
         let record = self
             .vault
             .get(id)
             .cloned()
             .ok_or_else(|| "凭据不存在".to_string())?;
-        let client = PortalClient::new(profile).map_err(safe_error)?;
+        let client = self
+            .cached_client()
+            .map_err(|error| safe_error_ref(&error))?;
         self.state.phase = GuardPhase::Authenticating;
         match client
             .login(&SrunAccount {
@@ -334,6 +366,7 @@ impl GuardWorker {
         {
             Ok(info) => {
                 self.mark_verified(id);
+                self.save_config()?;
                 self.set_online(id, info).await;
                 Ok(Some(self.state.clone()))
             }
@@ -348,11 +381,6 @@ impl GuardWorker {
         &mut self,
         id: &str,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
-        let profile = self
-            .config
-            .portal
-            .clone()
-            .ok_or_else(|| "尚未配置校园网门户".to_string())?;
         let old_id = self.config.active_account_id.clone();
         let old_record = old_id.as_deref().and_then(|id| self.vault.get(id)).cloned();
         let target = self
@@ -360,7 +388,9 @@ impl GuardWorker {
             .get(id)
             .cloned()
             .ok_or_else(|| "目标账号凭据不存在".to_string())?;
-        let client = PortalClient::new(profile).map_err(safe_error)?;
+        let client = self
+            .cached_client()
+            .map_err(|error| safe_error_ref(&error))?;
         self.state.phase = GuardPhase::Reconnecting;
 
         let current = match client.get_user_info().await {
@@ -407,10 +437,10 @@ impl GuardWorker {
     }
 
     async fn perform_cycle(&mut self) {
-        let Some(profile) = self.config.portal.clone() else {
+        if self.config.portal.is_none() {
             self.require_action("尚未配置校园网门户");
             return;
-        };
+        }
         let Some(active_id) = self.config.active_account_id.clone() else {
             self.require_action("尚未添加可用账号");
             return;
@@ -420,7 +450,7 @@ impl GuardWorker {
             return;
         }
 
-        let client = match PortalClient::new(profile) {
+        let client = match self.cached_client() {
             Ok(client) => client,
             Err(error) => {
                 self.require_action(&safe_error(error));
@@ -463,6 +493,17 @@ impl GuardWorker {
 
     async fn health_failure(&mut self) {
         self.failure_count += 1;
+        if self.outage_started.is_none() {
+            self.outage_started = Some(Instant::now());
+        }
+        if !self.outage_notified
+            && self
+                .outage_started
+                .is_some_and(|started| started.elapsed() >= Duration::from_secs(180))
+        {
+            notify::dispatch(&self.paths.root, NotificationEvent::NetworkDown);
+            self.outage_notified = true;
+        }
         if self.failure_count < 2 {
             self.state.phase = GuardPhase::Suspicious;
             self.next_check = Some(Instant::now() + FIRST_FAILURE_RECHECK);
@@ -552,6 +593,28 @@ impl GuardWorker {
 
     fn schedule_account_retry(&mut self, error: &SrunError) {
         if let SrunError::Login(failure) = error {
+            let notification = match failure.kind {
+                LoginFailureKind::InvalidCredentials | LoginFailureKind::AccountUnavailable => {
+                    Some((
+                        NotificationEvent::CredentialsRequired,
+                        "credentials_required",
+                    ))
+                }
+                LoginFailureKind::BalanceInsufficient => Some((
+                    NotificationEvent::BalanceInsufficient,
+                    "balance_insufficient",
+                )),
+                LoginFailureKind::DeviceLimit => {
+                    Some((NotificationEvent::DeviceLimit, "device_limit"))
+                }
+                _ => None,
+            };
+            if let Some((event, marker)) = notification {
+                if self.action_notification.as_deref() != Some(marker) {
+                    notify::dispatch(&self.paths.root, event);
+                    self.action_notification = Some(marker.to_owned());
+                }
+            }
             if failure.kind.should_pause() {
                 self.require_action(&safe_error_ref(error));
                 return;
@@ -568,6 +631,12 @@ impl GuardWorker {
     }
 
     async fn set_online(&mut self, account_id: &str, info: UserInfo) {
+        if self.outage_notified {
+            notify::dispatch(&self.paths.root, NotificationEvent::NetworkRestored);
+        }
+        self.outage_started = None;
+        self.outage_notified = false;
+        self.action_notification = None;
         self.failure_count = 0;
         self.network_backoff_step = 0;
         self.account_backoff_step = 0;
@@ -634,6 +703,22 @@ impl GuardWorker {
                     .find(|account| account.id == id && account.enabled)
             })
             .or_else(|| self.config.accounts.iter().find(|account| account.enabled))
+    }
+
+    fn cached_client(&mut self) -> std::result::Result<PortalClient, SrunError> {
+        let profile = self
+            .config
+            .portal
+            .clone()
+            .ok_or_else(|| SrunError::InvalidPortal("尚未配置校园网门户".into()))?;
+        if let Some((cached_profile, client)) = &self.portal_client {
+            if cached_profile == &profile {
+                return Ok(client.clone());
+            }
+        }
+        let client = PortalClient::new(profile.clone())?;
+        self.portal_client = Some((profile, client.clone()));
+        Ok(client)
     }
 
     fn save_config(&self) -> std::result::Result<(), String> {

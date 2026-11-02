@@ -4,6 +4,8 @@ members = [
     "crates/srun-core",
     "crates/srun-ipc",
     "crates/srun-daemon",
+    "crates/srun-notifier",
+    "crates/srun-setup",
     "src-tauri",
 ]
 

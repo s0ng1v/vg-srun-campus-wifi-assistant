@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use srun_core::PortalProfile;
 
+use crate::fsutil::replace_file;
+
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +22,6 @@ pub struct AccountMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub schema_version: u32,
-    pub owner_sid: Option<String>,
     pub guard_enabled: bool,
     pub auto_start_enabled: bool,
     pub portal: Option<PortalProfile>,
@@ -32,7 +33,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
-            owner_sid: None,
             guard_enabled: false,
             auto_start_enabled: false,
             portal: None,
@@ -122,11 +122,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     ));
     fs::write(&temporary, data)
         .with_context(|| format!("无法写入临时文件 {}", temporary.display()))?;
-    if path.exists() {
-        fs::remove_file(path).with_context(|| format!("无法替换旧文件 {}", path.display()))?;
-    }
-    fs::rename(&temporary, path).with_context(|| format!("无法提交配置文件 {}", path.display()))?;
-    Ok(())
+    replace_file(&temporary, path)
 }
 
 #[cfg(test)]
@@ -156,9 +152,12 @@ mod tests {
             ..AppConfig::default()
         };
         save_config(&paths, &config).unwrap();
-        let loaded = load_config(&paths).unwrap();
+        let mut loaded = load_config(&paths).unwrap();
         assert_eq!(loaded.accounts[0].id, "first");
         assert_eq!(loaded.active_account_id.as_deref(), Some("first"));
+        loaded.guard_enabled = true;
+        save_config(&paths, &loaded).unwrap();
+        assert!(load_config(&paths).unwrap().guard_enabled);
         fs::remove_dir_all(directory).unwrap();
     }
 }
