@@ -461,15 +461,15 @@ impl GuardWorker {
         let target_login = if known_ip.is_empty() {
             client
                 .login(&SrunAccount {
-                    username: target.username,
+                    username: target.username.clone(),
                     password: target.password,
                 })
                 .await
         } else {
             client
-                .login_after_logout(
+                .login_after_logout_confirmed(
                     &SrunAccount {
-                        username: target.username,
+                        username: target.username.clone(),
                         password: target.password,
                     },
                     &known_ip,
@@ -493,7 +493,7 @@ impl GuardWorker {
                 self.save_config()?;
                 return Err(self.fail_switch(&error));
             }
-            tokio::time::sleep(Duration::from_millis(1200)).await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
         }
 
         let Some(previous_id) = previous_id else {
@@ -511,24 +511,39 @@ impl GuardWorker {
             return Ok(Some(self.state.clone()));
         };
 
-        let restore_login = if known_ip.is_empty() {
-            client
-                .login(&SrunAccount {
-                    username: previous.username,
-                    password: previous.password,
-                })
-                .await
-        } else {
-            client
-                .login_after_logout(
-                    &SrunAccount {
-                        username: previous.username,
-                        password: previous.password,
-                    },
-                    &known_ip,
-                )
-                .await
+        let previous_account = SrunAccount {
+            username: previous.username,
+            password: previous.password,
         };
+        let mut restore_login = None;
+        let mut last_restore_error = None;
+        for attempt in 0..2 {
+            let result = if known_ip.is_empty() {
+                client.login(&previous_account).await
+            } else {
+                client
+                    .login_after_logout_confirmed(&previous_account, &known_ip)
+                    .await
+            };
+            match result {
+                Ok(info) => {
+                    restore_login = Some(info);
+                    break;
+                }
+                Err(error) => {
+                    last_restore_error = Some(error);
+                    if attempt == 0 {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    }
+                }
+            }
+        }
+        let restore_login = restore_login.ok_or_else(|| {
+            last_restore_error
+                .as_ref()
+                .map(safe_error_ref)
+                .unwrap_or_else(|| "恢复原账号失败".into())
+        });
         match restore_login {
             Ok(info) => {
                 self.config.active_account_id = Some(previous_id.clone());
@@ -538,13 +553,39 @@ impl GuardWorker {
                 Ok(Some(self.state.clone()))
             }
             Err(error) => {
+                if verified_info.is_some() {
+                    let expected_target = build_username(
+                        &target.username,
+                        self.config
+                            .portal
+                            .as_ref()
+                            .map(|portal| portal.domain.as_str())
+                            .unwrap_or_default(),
+                    );
+                    let target_still_online = client
+                        .get_user_info_best_effort(Duration::from_secs(2))
+                        .await
+                        .ok()
+                        .filter(|info| {
+                            info.is_online()
+                                && info.display_username().is_some_and(|actual| {
+                                    same_portal_identity(actual, &expected_target)
+                                })
+                        });
+                    if let Some(info) = target_still_online {
+                        self.config.active_account_id = Some(id.to_owned());
+                        self.save_config()?;
+                        fill_config_snapshot(&mut self.state, &self.config);
+                        self.set_online(id, info).await;
+                        self.state.last_error =
+                            Some("验证成功，但原账号恢复失败，已保持验证账号在线".into());
+                        return Ok(Some(self.state.clone()));
+                    }
+                }
                 self.state.phase = GuardPhase::NeedsAction;
                 self.save_config()?;
                 fill_config_snapshot(&mut self.state, &self.config);
-                Err(format!(
-                    "验证完成，但恢复原账号失败：{}",
-                    safe_error_ref(&error)
-                ))
+                Err(format!("验证完成，但恢复原账号失败：{}", error))
             }
         }
     }

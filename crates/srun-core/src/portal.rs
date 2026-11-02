@@ -136,6 +136,14 @@ impl PortalClient {
         self.login_with_ip(account, client_ip, false).await
     }
 
+    pub async fn login_after_logout_confirmed(
+        &self,
+        account: &SrunAccount,
+        client_ip: &str,
+    ) -> Result<UserInfo, SrunError> {
+        self.login_with_ip(account, client_ip, true).await
+    }
+
     async fn login_with_ip(
         &self,
         account: &SrunAccount,
@@ -361,14 +369,27 @@ impl PortalClient {
             .form(&[("_csrf-8800", csrf.as_str())])
             .send()
             .await?;
-        if response.status().is_success() || response.status().is_redirection() {
-            Ok(())
-        } else {
-            Err(SrunError::InvalidResponse(format!(
-                "自助服务一键下线返回 HTTP {}",
-                response.status()
-            )))
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if location.contains("login") || location.contains("sso") {
+                return Err(SrunError::InvalidResponse(
+                    "自助服务一键下线后跳回了登录页".into(),
+                ));
+            }
+            return Ok(());
         }
+        if response.status().is_success() {
+            return Ok(());
+        }
+        Err(SrunError::InvalidResponse(format!(
+            "自助服务一键下线返回 HTTP {}",
+            response.status()
+        )))
     }
 
     async fn logout_via_portal(&self, info: &UserInfo) -> Result<(), SrunError> {

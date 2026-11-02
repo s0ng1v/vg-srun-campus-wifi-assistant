@@ -152,7 +152,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.6",
+  daemon_version: "0.1.7",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -1182,7 +1182,11 @@ export default function LensOriginalApp() {
       const snapshot = await executeCommand({ type: "verify_account", id: account.id });
       const verifiedAccount = snapshot.accounts.find(entry => entry.id === account.id);
       if (verifiedAccount?.verified) {
-        lensToast.success(`${account.username} 验证成功，已恢复原账号`);
+        if (snapshot.online && snapshot.active_account_id !== account.id) {
+          lensToast.success(`${account.username} 验证成功，已恢复原账号`);
+        } else {
+          lensToast.error(`${account.username} 验证成功，但原账号恢复失败，已保持验证账号在线`);
+        }
       } else {
         lensToast.error(`${account.username} 验证失败，请检查账号或密码；已恢复原账号`);
       }
@@ -1425,7 +1429,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.6</b></span>
+          <span>VG校园网助手 <b>0.1.7</b></span>
         </footer>
       </div>
 
@@ -1541,7 +1545,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.6 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.7 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"
