@@ -160,7 +160,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.0",
+  daemon_version: "0.1.1",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -525,7 +525,7 @@ function AccountRecord({
                 { value: "edit", label: "编辑账号" },
                 { value: "up", label: "上移一行", disabled: index === 0 },
                 { value: "down", label: "下移一行", disabled: index === count - 1 },
-                { value: "toggle", label: account.enabled ? "停用账号" : "启用账号", disabled: active },
+                { value: "toggle", label: account.enabled ? "停用账号" : "启用账号" },
                 { value: "remove", label: "移除账号", disabled: active },
               ]}
           onAction={value => {
@@ -673,21 +673,26 @@ function AccountDialog({
 function PortalDialog({
   open,
   currentHost,
+  currentAcId,
   onClose,
   onSaved,
 }: {
   open: boolean;
   currentHost?: string;
+  currentAcId?: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const currentUrl = currentHost
+    ? `https://${currentHost}/srun_portal_pc?ac_id=${encodeURIComponent(currentAcId || "5")}&theme=pro`
+    : "";
 
   useEffect(() => {
     if (!open) return;
-    setUrl("");
+    setUrl(currentUrl);
     setBusy(false);
     setError("");
   }, [open]);
@@ -699,7 +704,12 @@ function PortalDialog({
       const portal = await discoverPortal();
       setUrl(`${portal.base_url}/srun_portal_pc?ac_id=${encodeURIComponent(portal.ac_id)}&theme=pro`);
     } catch (detectError) {
-      setError(detectError instanceof Error ? detectError.message : "没有自动发现校园网门户");
+      if (currentUrl) {
+        setUrl(currentUrl);
+        setError("当前已在线时通常不会发生门户跳转，已保留现有门户地址");
+      } else {
+        setError(detectError instanceof Error ? detectError.message : "没有自动发现校园网门户");
+      }
     } finally {
       setBusy(false);
     }
@@ -991,17 +1001,18 @@ export default function LensOriginalApp() {
         setForm({ mode: "add", id: crypto.randomUUID(), username: "" });
         throw new Error("请先添加校园网登录账号");
       }
-      if (next) {
-        const candidate = snapshot.accounts.find(account => account.id === snapshot.active_account_id)
-          ?? snapshot.accounts.find(account => account.enabled);
-        if (candidate && !candidate.verified && !snapshot.online) {
-          await executeCommand({ type: "verify_account", id: candidate.id });
-        }
-      }
+      let autoStartWarning: string | null = null;
       if (next && !snapshot.auto_start_enabled) {
         lensToast.info("首次开启需要在 Windows 权限提示中允许注册开机守护");
-        await installSystemIntegration();
-        applySnapshot(await getDaemonSnapshot());
+        try {
+          await installSystemIntegration();
+          applySnapshot(await getDaemonSnapshot());
+        } catch (installationError) {
+          autoStartWarning = installationError instanceof Error
+            ? installationError.message
+            : "系统开机启动项注册失败";
+          setLastError(autoStartWarning);
+        }
       }
       await executeCommand({ type: "set_guard", enabled: next });
       if (!next) {
@@ -1012,6 +1023,9 @@ export default function LensOriginalApp() {
         localStorage.setItem(GUARD_INTENT_KEY, String(next));
       } catch {
         // State persistence is optional in restricted previews.
+      }
+      if (autoStartWarning) {
+        lensToast.error(`开机启动项未注册，当前会话将继续尝试守护：${autoStartWarning}`);
       }
       lensToast.success(next ? "网络守护已启动" : "网络守护已关闭");
     } catch (error) {
@@ -1354,7 +1368,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.0</b></span>
+          <span>VG校园网助手 <b>0.1.1</b></span>
         </footer>
       </div>
 
@@ -1367,6 +1381,7 @@ export default function LensOriginalApp() {
       <PortalDialog
         open={portalOpen}
         currentHost={portal?.host}
+        currentAcId={portal?.ac_id}
         onClose={() => setPortalOpen(false)}
         onSaved={handlePortalSaved}
       />
@@ -1421,7 +1436,14 @@ export default function LensOriginalApp() {
               <strong>校园网门户</strong>
               <span>{portal ? `${portal.host} · ac_id ${portal.ac_id}` : "尚未配置"}</span>
             </div>
-            <LensActionButton label="配置门户" className="vg-quiet-button" onPress={() => setPortalOpen(true)} />
+            <LensActionButton
+              label="配置门户"
+              className="vg-quiet-button"
+              onPress={() => {
+                setSettingsOpen(false);
+                setPortalOpen(true);
+              }}
+            />
           </div>
           <div className="vg-setting-row">
             <div>
@@ -1462,7 +1484,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.0 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.1 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

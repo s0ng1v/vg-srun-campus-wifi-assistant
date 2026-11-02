@@ -9,7 +9,9 @@ use srun_core::PortalProfile;
 
 use crate::fsutil::replace_file;
 
-const CONFIG_SCHEMA_VERSION: u32 = 1;
+const CONFIG_SCHEMA_VERSION: u32 = 3;
+const CHD_PORTAL_URL: &str = "https://beiradius.chd.edu.cn";
+const CHD_AC_ID: &str = "5";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountMeta {
@@ -35,7 +37,11 @@ impl Default for AppConfig {
             schema_version: CONFIG_SCHEMA_VERSION,
             guard_enabled: false,
             auto_start_enabled: false,
-            portal: None,
+            portal: Some(PortalProfile {
+                base_url: CHD_PORTAL_URL.into(),
+                ac_id: CHD_AC_ID.into(),
+                domain: String::new(),
+            }),
             accounts: Vec::new(),
             active_account_id: None,
         }
@@ -88,9 +94,6 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
         .with_context(|| format!("无法读取配置 {}", paths.config.display()))?;
     let mut config: AppConfig = serde_json::from_slice(&bytes)
         .with_context(|| format!("配置文件格式无效 {}", paths.config.display()))?;
-    if config.schema_version == 0 {
-        config.schema_version = CONFIG_SCHEMA_VERSION;
-    }
     if config.schema_version > CONFIG_SCHEMA_VERSION {
         anyhow::bail!(
             "配置文件版本 {} 高于程序支持的版本 {}",
@@ -98,12 +101,32 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
             CONFIG_SCHEMA_VERSION
         );
     }
+    let mut migrated = config.schema_version < CONFIG_SCHEMA_VERSION;
     if config.active_account_id.is_none() {
         config.active_account_id = config
             .accounts
             .iter()
             .find(|account| account.enabled)
             .map(|account| account.id.clone());
+    }
+    if let Some(portal) = &mut config.portal {
+        if portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL
+            && matches!(portal.ac_id.as_str(), "" | "1")
+        {
+            portal.ac_id = CHD_AC_ID.into();
+            migrated = true;
+        }
+        if !portal.domain.is_empty() && !srun_core::valid_portal_domain(&portal.domain) {
+            portal.domain.clear();
+            migrated = true;
+        }
+    }
+    if migrated {
+        for account in &mut config.accounts {
+            account.verified = false;
+        }
+        config.schema_version = CONFIG_SCHEMA_VERSION;
+        let _ = save_config(paths, &config);
     }
     Ok(config)
 }
@@ -158,6 +181,42 @@ mod tests {
         loaded.guard_enabled = true;
         save_config(&paths, &loaded).unwrap();
         assert!(load_config(&paths).unwrap().guard_enabled);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn chd_default_and_legacy_state_are_migrated() {
+        let default_portal = AppConfig::default().portal.unwrap();
+        assert_eq!(default_portal.base_url, CHD_PORTAL_URL);
+        assert_eq!(default_portal.ac_id, "5");
+
+        let directory = std::env::temp_dir().join(format!(
+            "vg-campus-config-migration-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::from_root(&directory).unwrap();
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "guard_enabled": false,
+            "auto_start_enabled": false,
+            "portal": {
+                "base_url": CHD_PORTAL_URL,
+                "ac_id": "1",
+                "domain": ""
+            },
+            "accounts": [{
+                "id": "legacy",
+                "username": "fixture",
+                "enabled": true,
+                "verified": true
+            }],
+            "active_account_id": "legacy"
+        });
+        fs::write(&paths.config, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        let migrated = load_config(&paths).unwrap();
+        assert_eq!(migrated.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(migrated.portal.unwrap().ac_id, "5");
+        assert!(!migrated.accounts[0].verified);
         fs::remove_dir_all(directory).unwrap();
     }
 }

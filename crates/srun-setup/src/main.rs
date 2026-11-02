@@ -6,9 +6,11 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
+    time::SystemTime,
 };
 
-use srun_ipc::{DAEMON_TASK_NAME, NOTIFIER_TASK_NAME};
+use anyhow::Context;
+use srun_ipc::{DAEMON_ONDEMAND_TASK_NAME, DAEMON_TASK_NAME, NOTIFIER_TASK_NAME};
 
 const APP_ID: &str = "io.github.v1gn0s.vg-campus-wifi-assistant";
 const PROTOCOL: &str = "vg-campus-wifi-assistant";
@@ -40,12 +42,18 @@ fn run() -> anyhow::Result<()> {
         return Ok(());
     }
     let options = parse_options(&arguments[1..])?;
+    log(format!(
+        "command={command} token_elevated={} elevated_flag={}",
+        is_admin(),
+        options.elevated
+    ));
 
     let result = if needs_admin(command) && !is_admin() && !options.elevated {
         elevate(command, &options)
     } else {
         match command {
             "install" => install(&options),
+            "repair" => repair(&options),
             "enable" => enable_daemon(),
             "disable" => disable_daemon(),
             "uninstall" => uninstall(),
@@ -56,6 +64,24 @@ fn run() -> anyhow::Result<()> {
         let _ = fs::write(path, format!("error:{error:#}"));
     }
     result
+}
+
+fn repair(options: &Options) -> anyhow::Result<()> {
+    let owner_sid = options
+        .owner_sid
+        .clone()
+        .or_else(current_user_sid)
+        .filter(|sid| valid_sid(sid))
+        .ok_or_else(|| anyhow::anyhow!("无法确定当前用户 SID"))?;
+    let data_root = data_root();
+    secure_data_directory(&data_root, &owner_sid)?;
+    register_owner_sid(&owner_sid)?;
+    ensure_owner_sid(&data_root.join("owner.sid"), &owner_sid);
+    if let Some(path) = &options.ready_file {
+        fs::write(path, "ok")?;
+    }
+    log("数据目录权限修复完成");
+    Ok(())
 }
 
 fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
@@ -93,10 +119,12 @@ fn parse_options(arguments: &[String]) -> anyhow::Result<Options> {
 }
 
 fn install(options: &Options) -> anyhow::Result<()> {
+    log("开始安装系统集成");
     let daemon = validate_executable(options.daemon.as_deref(), "守护程序")?;
     let notifier = validate_executable(options.notifier.as_deref(), "通知程序")?;
     let gui = validate_executable(options.gui.as_deref(), "图形界面")?;
-    let installed = install_files(&daemon, &notifier, &gui)?;
+    let installed =
+        install_files(&daemon, &notifier, &gui).with_context(|| "复制受保护程序文件失败")?;
     let owner_sid = options
         .owner_sid
         .clone()
@@ -105,12 +133,17 @@ fn install(options: &Options) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("无法确定当前用户 SID"))?;
 
     let data_root = data_root();
-    fs::create_dir_all(&data_root)?;
-    fs::write(data_root.join("owner.sid"), &owner_sid)?;
-    restrict_data_directory(&data_root, &owner_sid);
+    ensure_data_directory(&data_root)?;
+    log("开始修复数据目录权限");
+    secure_data_directory(&data_root, &owner_sid)?;
+    register_owner_sid(&owner_sid)?;
+    ensure_owner_sid(&data_root.join("owner.sid"), &owner_sid);
 
-    let daemon_xml = daemon_task_xml(&installed.daemon)?;
+    let daemon_xml = daemon_task_xml(&installed.daemon, &owner_sid, true)?;
+    log("开始注册开机守护任务");
     register_task(DAEMON_TASK_NAME, &daemon_xml)?;
+    let ondemand_xml = daemon_task_xml(&installed.daemon, &owner_sid, false)?;
+    register_task(DAEMON_ONDEMAND_TASK_NAME, &ondemand_xml)?;
     let notifier_xml = notifier_task_xml(&installed.notifier, &owner_sid)?;
     register_task(NOTIFIER_TASK_NAME, &notifier_xml)?;
     register_protocol(&installed.gui)?;
@@ -132,10 +165,13 @@ fn install_files(daemon: &Path, notifier: &Path, gui: &Path) -> anyhow::Result<I
     let program_files = env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
-    let app_directory = program_files
-        .join("VGCampusWifiAssistant")
-        .join(format!("app-{}", env!("CARGO_PKG_VERSION")));
-    fs::create_dir_all(&app_directory)?;
+    let app_directory = program_files.join("VGCampusWifiAssistant").join(format!(
+        "app-{}-{}",
+        env!("CARGO_PKG_VERSION"),
+        build_directory_stamp()
+    ));
+    fs::create_dir_all(&app_directory)
+        .with_context(|| format!("无法创建程序目录 {}", app_directory.display()))?;
 
     let daemon_target = app_directory.join("vg-campus-daemon.exe");
     let notifier_target = app_directory.join("vg-campus-notifier.exe");
@@ -147,7 +183,6 @@ fn install_files(daemon: &Path, notifier: &Path, gui: &Path) -> anyhow::Result<I
     if let Ok(current) = env::current_exe() {
         copy_if_needed(&current, &setup_target)?;
     }
-    restrict_install_directory(&app_directory);
     Ok(InstalledBinaries {
         daemon: daemon_target,
         notifier: notifier_target,
@@ -155,17 +190,14 @@ fn install_files(daemon: &Path, notifier: &Path, gui: &Path) -> anyhow::Result<I
     })
 }
 
-fn restrict_install_directory(app_directory: &Path) {
-    let path = app_directory.to_string_lossy().to_string();
-    let _ = run_hidden(Command::new("icacls.exe").args([
-        &path,
-        "/inheritance:r",
-        "/grant:r",
-        "*S-1-5-18:(OI)(CI)F",
-        "*S-1-5-32-544:(OI)(CI)F",
-        "*S-1-5-32-545:(OI)(CI)RX",
-        "/T",
-    ]));
+fn build_directory_stamp() -> u64 {
+    env::current_exe()
+        .and_then(fs::metadata)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 fn copy_if_needed(source: &Path, target: &Path) -> anyhow::Result<()> {
@@ -177,7 +209,8 @@ fn copy_if_needed(source: &Path, target: &Path) -> anyhow::Result<()> {
     {
         return Ok(());
     }
-    fs::copy(source, target)?;
+    fs::copy(source, target)
+        .with_context(|| format!("无法复制 {} 到 {}", source.display(), target.display()))?;
     Ok(())
 }
 
@@ -189,6 +222,12 @@ fn enable_daemon() -> anyhow::Result<()> {
 
 fn disable_daemon() -> anyhow::Result<()> {
     run_schtasks(["/Change", "/TN", DAEMON_TASK_NAME, "/DISABLE"])?;
+    let _ = run_hidden(Command::new("schtasks.exe").args([
+        "/Change",
+        "/TN",
+        DAEMON_ONDEMAND_TASK_NAME,
+        "/DISABLE",
+    ]));
     let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
     Ok(())
 }
@@ -198,6 +237,12 @@ fn uninstall() -> anyhow::Result<()> {
         run_hidden(Command::new("schtasks.exe").args(["/Delete", "/TN", NOTIFIER_TASK_NAME, "/F"]));
     let _ =
         run_hidden(Command::new("schtasks.exe").args(["/Delete", "/TN", DAEMON_TASK_NAME, "/F"]));
+    let _ = run_hidden(Command::new("schtasks.exe").args([
+        "/Delete",
+        "/TN",
+        DAEMON_ONDEMAND_TASK_NAME,
+        "/F",
+    ]));
     let _ = run_hidden(Command::new("reg.exe").args([
         "delete",
         &format!(r"HKLM\Software\Classes\{PROTOCOL}"),
@@ -207,24 +252,32 @@ fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn daemon_task_xml(daemon: &Path) -> anyhow::Result<String> {
+fn daemon_task_xml(daemon: &Path, owner_sid: &str, boot: bool) -> anyhow::Result<String> {
     let executable = xml_escape(&daemon.to_string_lossy());
     let working_directory =
         xml_escape(&daemon.parent().unwrap_or(Path::new(".")).to_string_lossy());
+    let triggers = if boot {
+        "<Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT3S</Delay></BootTrigger></Triggers>"
+    } else {
+        "<Triggers />"
+    };
+    let arguments = if boot {
+        "<Arguments>--onstart</Arguments>"
+    } else {
+        ""
+    };
     Ok(format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>v1gn0s</Author>
     <Description>VG Campus Wi-Fi Assistant system daemon</Description>
+    <SecurityDescriptor>D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner_sid})</SecurityDescriptor>
   </RegistrationInfo>
-  <Triggers>
-    <BootTrigger><Enabled>true</Enabled><Delay>PT3S</Delay></BootTrigger>
-  </Triggers>
+  {triggers}
   <Principals>
     <Principal id="Author">
       <UserId>S-1-5-18</UserId>
-      <LogonType>ServiceAccount</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
@@ -245,10 +298,10 @@ fn daemon_task_xml(daemon: &Path) -> anyhow::Result<String> {
     <Priority>7</Priority>
     <RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>
   </Settings>
-  <Actions Context="Author">
+  <Actions>
     <Exec>
       <Command>{executable}</Command>
-      <Arguments>--onstart</Arguments>
+      {arguments}
       <WorkingDirectory>{working_directory}</WorkingDirectory>
     </Exec>
   </Actions>
@@ -264,12 +317,14 @@ fn notifier_task_xml(notifier: &Path, owner_sid: &str) -> anyhow::Result<String>
             .unwrap_or(Path::new("."))
             .to_string_lossy(),
     );
+    let security_descriptor = format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner_sid})");
     Ok(format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
+        r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>v1gn0s</Author>
     <Description>VG Campus Wi-Fi Assistant on-demand notifier</Description>
+    <SecurityDescriptor>{security_descriptor}</SecurityDescriptor>
   </RegistrationInfo>
   <Triggers />
   <Principals>
@@ -294,7 +349,7 @@ fn notifier_task_xml(notifier: &Path, owner_sid: &str) -> anyhow::Result<String>
     <ExecutionTimeLimit>PT1M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
-  <Actions Context="Author">
+  <Actions>
     <Exec>
       <Command>{executable}</Command>
       <WorkingDirectory>{working_directory}</WorkingDirectory>
@@ -306,15 +361,67 @@ fn notifier_task_xml(notifier: &Path, owner_sid: &str) -> anyhow::Result<String>
 
 fn register_task(name: &str, xml: &str) -> anyhow::Result<()> {
     let path = env::temp_dir().join(format!("{name}-{}.xml", std::process::id()));
-    fs::write(&path, xml)?;
-    let task_path = path.to_string_lossy().into_owned();
-    let status = run_hidden(
-        Command::new("schtasks.exe").args(["/Create", "/TN", name, "/XML", &task_path, "/F"]),
-    )?;
-    let _ = fs::remove_file(path);
-    if !status {
-        anyhow::bail!("注册计划任务 {name} 失败");
+    let mut encoded = vec![0xFF, 0xFE];
+    for unit in xml.encode_utf16() {
+        encoded.extend_from_slice(&unit.to_le_bytes());
     }
+    fs::write(&path, encoded)?;
+    let task_path = path.to_string_lossy().into_owned();
+    let output = Command::new("schtasks.exe")
+        .args(["/Create", "/TN", name, "/XML", &task_path, "/F"])
+        .stdin(Stdio::null())
+        .output()?;
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() {
+        let _ = fs::remove_file(path);
+        log(format!("计划任务 {name} 注册成功（schtasks）"));
+        return Ok(());
+    }
+    log(format!("schtasks 注册计划任务 {name} 失败：{detail}"));
+
+    let script = "$xml = Get-Content -Raw -LiteralPath $env:VG_TASK_XML; Register-ScheduledTask -TaskName $env:VG_TASK_NAME -Xml $xml -Force | Out-Null";
+    let mut fallback = Command::new("powershell.exe");
+    fallback
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .env("VG_TASK_XML", &task_path)
+        .env("VG_TASK_NAME", name)
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        fallback.creation_flags(0x0800_0000);
+    }
+    let fallback_output = fallback.output()?;
+    let _ = fs::remove_file(path);
+    let fallback_detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&fallback_output.stdout),
+        String::from_utf8_lossy(&fallback_output.stderr)
+    );
+    if !fallback_output.status.success() {
+        log(format!(
+            "Register-ScheduledTask 注册计划任务 {name} 失败：{fallback_detail}"
+        ));
+        anyhow::bail!(
+            "注册计划任务 {name} 失败：schtasks={}；PowerShell={}",
+            detail.trim(),
+            fallback_detail.trim()
+        );
+    }
+    log(format!(
+        "计划任务 {name} 注册成功（Register-ScheduledTask）"
+    ));
     Ok(())
 }
 
@@ -367,20 +474,170 @@ fn run_reg<const N: usize>(arguments: [&str; N]) -> anyhow::Result<()> {
     }
 }
 
-fn restrict_data_directory(data_root: &Path, owner_sid: &str) {
+fn secure_data_directory(data_root: &Path, owner_sid: &str) -> anyhow::Result<()> {
     let path = data_root.to_string_lossy().to_string();
     let system = "*S-1-5-18:(OI)(CI)F";
     let administrators = "*S-1-5-32-544:(OI)(CI)F";
     let owner = format!("*{owner_sid}:(OI)(CI)M");
-    let _ = run_hidden(Command::new("icacls.exe").args([
-        &path,
-        "/inheritance:r",
-        "/grant:r",
-        system,
-        administrators,
-        &owner,
-        "/T",
-    ]));
+    let _ = run_logged(
+        Command::new("takeown.exe").args(["/F", &path, "/R", "/A", "/D", "Y"]),
+        "takeown data directory",
+    );
+    let _ = run_logged(
+        Command::new("icacls.exe").args([&path, "/reset", "/T", "/C"]),
+        "icacls reset data directory",
+    );
+    let granted = run_logged(
+        Command::new("icacls.exe").args([
+            &path,
+            "/inheritance:r",
+            "/grant:r",
+            system,
+            administrators,
+            &owner,
+            "/T",
+            "/C",
+        ]),
+        "icacls grant data directory",
+    )?;
+    if !granted {
+        anyhow::bail!("无法修复数据目录访问权限：{path}");
+    }
+    apply_data_dacl(data_root, owner_sid)?;
+    let integrity_set = run_logged(
+        Command::new("icacls.exe").args([&path, "/setintegritylevel", "M", "/T", "/C"]),
+        "icacls set integrity",
+    )?;
+    if !integrity_set {
+        log(format!("部分数据文件仍保持高完整性级别：{path}"));
+    }
+    for name in [
+        "config.json.tmp",
+        "credentials.dat.tmp",
+        "notification-event.tmp",
+    ] {
+        let _ = fs::remove_file(data_root.join(name));
+    }
+    Ok(())
+}
+
+fn apply_data_dacl(data_root: &Path, owner_sid: &str) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, SetFileSecurityW,
+            DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        },
+    };
+
+    fn apply(path: &Path, sddl: &str) -> anyhow::Result<()> {
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut size = 0u32;
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                &mut size,
+            )
+        };
+        if converted == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("无法生成 ACL：{}", path.display()));
+        }
+        let applied = unsafe {
+            SetFileSecurityW(
+                wide_path.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        };
+        unsafe {
+            LocalFree(descriptor);
+        }
+        if applied == 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("无法设置 ACL：{}", path.display()));
+        }
+        Ok(())
+    }
+
+    let directory_sddl = format!("D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)(A;OICI;GA;;;{owner_sid})");
+    let file_sddl = format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{owner_sid})");
+    apply(data_root, &directory_sddl)?;
+    for entry in fs::read_dir(data_root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let sddl = if path.is_dir() {
+            &directory_sddl
+        } else {
+            &file_sddl
+        };
+        apply(&path, sddl)?;
+        if path.is_dir() {
+            for child in fs::read_dir(path)? {
+                apply(&child?.path(), &file_sddl)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_data_directory(data_root: &Path) -> anyhow::Result<()> {
+    match fs::metadata(data_root) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => anyhow::bail!("数据路径不是目录：{}", data_root.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(data_root)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn run_logged(command: &mut Command, label: &str) -> std::io::Result<bool> {
+    let output = command.stdin(Stdio::null()).output()?;
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    log(format!("{label}: {}", detail.trim()));
+    Ok(output.status.success())
+}
+
+fn ensure_owner_sid(path: &Path, owner_sid: &str) {
+    if fs::read_to_string(path)
+        .ok()
+        .is_some_and(|current| current.trim().eq_ignore_ascii_case(owner_sid))
+    {
+        return;
+    }
+    if let Err(error) = fs::write(path, owner_sid) {
+        log(format!("无法写入 {}：{error}", path.display()));
+    }
+}
+
+fn register_owner_sid(owner_sid: &str) -> anyhow::Result<()> {
+    run_reg([
+        "add",
+        r"HKLM\Software\VGCampusWifiAssistant",
+        "/v",
+        "OwnerSid",
+        "/t",
+        "REG_SZ",
+        "/d",
+        owner_sid,
+        "/f",
+    ])
 }
 
 fn validate_executable(path: Option<&Path>, label: &str) -> anyhow::Result<PathBuf> {
@@ -442,13 +699,39 @@ fn run_hidden(command: &mut Command) -> std::io::Result<bool> {
 }
 
 fn needs_admin(command: &str) -> bool {
-    matches!(command, "install" | "enable" | "disable" | "uninstall")
+    matches!(
+        command,
+        "install" | "repair" | "enable" | "disable" | "uninstall"
+    )
 }
 
 fn is_admin() -> bool {
     #[cfg(windows)]
-    unsafe {
-        windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0
+    {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+            System::Threading::{GetCurrentProcess, OpenProcessToken},
+        };
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return false;
+        }
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut returned = 0u32;
+        let succeeded = unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut returned,
+            )
+        };
+        unsafe {
+            CloseHandle(token);
+        }
+        succeeded != 0 && elevation.TokenIsElevated != 0
     }
     #[cfg(not(windows))]
     {
@@ -539,7 +822,12 @@ mod tests {
 
     #[test]
     fn daemon_task_runs_on_start_without_execution_limit() {
-        let xml = daemon_task_xml(Path::new(r"C:\Program Files\VG\daemon.exe")).unwrap();
+        let xml = daemon_task_xml(
+            Path::new(r"C:\Program Files\VG\daemon.exe"),
+            "S-1-5-21-100-200-300-1001",
+            true,
+        )
+        .unwrap();
         assert!(xml.contains("<Arguments>--onstart</Arguments>"));
         assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(xml.contains(
@@ -557,6 +845,19 @@ mod tests {
         assert!(xml.contains("<UserId>S-1-5-21-100-200-300-1001</UserId>"));
         assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
         assert!(!xml.contains("<BootTrigger>"));
+    }
+
+    #[test]
+    fn daemon_on_demand_task_has_no_boot_trigger_or_arg() {
+        let xml = daemon_task_xml(
+            Path::new(r"C:\Program Files\VG\daemon.exe"),
+            "S-1-5-21-100-200-300-1001",
+            false,
+        )
+        .unwrap();
+        assert!(xml.contains("<Triggers />"));
+        assert!(!xml.contains("--onstart"));
+        assert!(xml.contains("S-1-5-21-100-200-300-1001"));
     }
 
     #[test]

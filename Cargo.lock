@@ -3458,7 +3458,7 @@ dependencies = [
 
 [[package]]
 name = "srun-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "srun-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3486,11 +3486,12 @@ dependencies = [
  "tokio",
  "uuid",
  "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]
 name = "srun-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3498,7 +3499,7 @@ dependencies = [
 
 [[package]]
 name = "srun-notifier"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows",
  "winreg",
@@ -3506,7 +3507,7 @@ dependencies = [
 
 [[package]]
 name = "srun-setup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "srun-ipc",
@@ -4411,7 +4412,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vg-campus-assistant"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "srun-core",

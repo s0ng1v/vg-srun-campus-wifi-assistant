@@ -46,7 +46,7 @@ async fn get_daemon_snapshot() -> Result<srun_ipc::DaemonSnapshot, String> {
 
 #[tauri::command]
 async fn start_daemon() -> Result<(), String> {
-    launcher::ensure_running().await
+    launcher::ensure_running_or_repair().await
 }
 
 #[tauri::command]

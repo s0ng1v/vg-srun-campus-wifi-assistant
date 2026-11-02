@@ -133,8 +133,29 @@ pub fn extract_portal_domain(source: &str) -> Option<String> {
             .and_then(|regex| regex.captures(source))
             .and_then(|captures| captures.get(1))
             .map(|value| value.as_str().trim().to_owned())
-            .filter(|value| !value.is_empty())
+            .filter(|value| valid_portal_domain(value))
     })
+}
+
+pub fn valid_portal_domain(value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "cmcc" | "ctcc" | "cucc"
+    ) {
+        return true;
+    }
+    let Some(suffix) = value.strip_prefix('@') else {
+        return false;
+    };
+    !suffix.is_empty()
+        && suffix.len() <= 32
+        && suffix.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
 }
 
 #[cfg(test)]
@@ -157,6 +178,14 @@ mod tests {
             extract_portal_domain(r#"var config = {"domain": "@campus"};"#),
             Some("@campus".into())
         );
+    }
+
+    #[test]
+    fn rejects_domain_labels_from_portal_markup() {
+        assert!(!valid_portal_domain("用户域名"));
+        assert!(!valid_portal_domain("Domain"));
+        assert!(valid_portal_domain("cmcc"));
+        assert!(valid_portal_domain("@campus"));
     }
 
     #[test]

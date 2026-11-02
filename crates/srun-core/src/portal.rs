@@ -127,7 +127,7 @@ impl PortalClient {
             .query(&[
                 ("callback", callback_name()),
                 ("action", "login".to_owned()),
-                ("username", real_username),
+                ("username", real_username.clone()),
                 ("password", format!("{{MD5}}{hmd5}")),
                 ("os", "Windows".to_owned()),
                 ("name", "Windows".to_owned()),
@@ -144,11 +144,24 @@ impl PortalClient {
             .await?;
         let text = response.text().await?;
         let value = parse_jsonp(&text)?;
-        let result: UserInfo = serde_json::from_value(value.clone())
-            .map_err(|error| SrunError::InvalidResponse(error.to_string()))?;
-
         if login_value_succeeded(&value) {
-            return Ok(result);
+            let session = self.get_user_info().await?;
+            if !session.is_online() {
+                return Err(SrunError::Login(LoginFailure::new(
+                    LoginFailureKind::Unknown,
+                    "session_not_online",
+                    "登录接口返回成功，但门户会话未建立",
+                )));
+            }
+            let actual_username = session.display_username().unwrap_or_default();
+            if !same_portal_identity(actual_username, &real_username) {
+                return Err(SrunError::Login(LoginFailure::new(
+                    LoginFailureKind::Unknown,
+                    "session_mismatch",
+                    "登录后的门户账号与目标账号不一致",
+                )));
+            }
+            return Ok(session);
         }
 
         let code = string_field(&value, "error")
@@ -258,6 +271,20 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
     })
 }
 
+pub fn same_portal_identity(actual: &str, expected: &str) -> bool {
+    let actual = actual.trim();
+    let expected = expected.trim();
+    if actual.eq_ignore_ascii_case(expected) {
+        return true;
+    }
+    if expected.contains('@') {
+        return false;
+    }
+    actual
+        .split_once('@')
+        .is_some_and(|(base, _)| base.eq_ignore_ascii_case(expected))
+}
+
 fn callback_name() -> String {
     format!("jQuery_{}", unix_millis())
 }
@@ -289,5 +316,14 @@ mod tests {
             domain: String::new(),
         };
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn portal_identity_must_match_the_authenticated_account() {
+        assert!(same_portal_identity("10000001", "10000001"));
+        assert!(same_portal_identity("10000001@cmcc", "10000001"));
+        assert!(same_portal_identity("10000001@cmcc", "10000001@cmcc"));
+        assert!(!same_portal_identity("10000001@ctcc", "10000001@cmcc"));
+        assert!(!same_portal_identity("20000002", "10000001"));
     }
 }

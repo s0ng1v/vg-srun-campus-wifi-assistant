@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 pub const PIPE_NAME: &str = r"\\.\pipe\VGCampusWifiAssistant.v1";
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const DAEMON_TASK_NAME: &str = "VGCampusWifiAssistantDaemon";
+pub const DAEMON_ONDEMAND_TASK_NAME: &str = "VGCampusWifiAssistantDaemonOnDemand";
 pub const NOTIFIER_TASK_NAME: &str = "VGCampusWifiAssistantNotifier";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

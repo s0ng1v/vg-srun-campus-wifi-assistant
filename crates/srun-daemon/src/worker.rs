@@ -3,8 +3,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use chrono::{DateTime, SecondsFormat, Utc};
 use srun_core::{
-    enrich_portal_profile, portal_profile_from_login_url, probe_external, ExternalProbe,
-    LoginFailureKind, PortalClient, SrunAccount, SrunError, UserInfo,
+    build_username, enrich_portal_profile, portal_profile_from_login_url, probe_external,
+    same_portal_identity, ExternalProbe, LoginFailureKind, PortalClient, SrunAccount, SrunError,
+    UserInfo,
 };
 use srun_ipc::{
     AccountDraft, AccountSummary, DaemonCommand, DaemonSnapshot, GuardPhase, PortalSnapshot,
@@ -161,7 +162,7 @@ impl GuardWorker {
             DaemonCommand::SaveAccount { account } => self.save_account(account).await,
             DaemonCommand::RemoveAccount { id } => self.remove_account(&id),
             DaemonCommand::SetAccountEnabled { id, enabled } => {
-                self.set_account_enabled(&id, enabled)
+                self.set_account_enabled(&id, enabled).await
             }
             DaemonCommand::ReorderAccounts { ids } => self.reorder_accounts(&ids),
             DaemonCommand::SetPortal { portal_url } => self.set_portal(&portal_url).await,
@@ -231,10 +232,10 @@ impl GuardWorker {
                 username: username.clone(),
                 password,
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         self.vault
             .save(&self.paths.credentials)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
 
         if let Some(account) = self
             .config
@@ -269,7 +270,7 @@ impl GuardWorker {
         self.vault.remove(id);
         self.vault
             .save(&self.paths.credentials)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("{error:#}"))?;
         if self.config.active_account_id.as_deref() == Some(id) {
             self.config.active_account_id = self
                 .config
@@ -283,13 +284,53 @@ impl GuardWorker {
         Ok(Some(self.state.clone()))
     }
 
-    fn set_account_enabled(
+    async fn set_account_enabled(
         &mut self,
         id: &str,
         enabled: bool,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
-        if self.config.active_account_id.as_deref() == Some(id) && !enabled && self.state.online {
-            return Err("不能停用当前在线账号".into());
+        let was_active = self.config.active_account_id.as_deref() == Some(id);
+        let selected_username = self
+            .config
+            .accounts
+            .iter()
+            .find(|account| account.id == id)
+            .map(|account| account.username.clone())
+            .ok_or_else(|| "账号不存在".to_string())?;
+        let mut preserved_session_account = None;
+        if was_active && !enabled {
+            let client = self
+                .cached_client()
+                .map_err(|error| safe_error_ref(&error))?;
+            let current = client
+                .get_user_info()
+                .await
+                .map_err(|error| safe_error_ref(&error))?;
+            let domain = self
+                .config
+                .portal
+                .as_ref()
+                .map(|portal| portal.domain.as_str())
+                .unwrap_or_default();
+            let expected = build_username(&selected_username, domain);
+            if current
+                .display_username()
+                .is_some_and(|actual| same_portal_identity(actual, &expected))
+                && current.is_online()
+            {
+                client
+                    .logout(&current)
+                    .await
+                    .map_err(|error| safe_error_ref(&error))?;
+                self.state.online = false;
+                self.state.user = None;
+            } else if current.is_online() {
+                preserved_session_account = self.account_id_for_session(&current);
+                self.state.user = Some(user_snapshot(&current, &self.config));
+            } else {
+                self.state.online = false;
+                self.state.user = None;
+            }
         }
         let account = self
             .config
@@ -298,6 +339,24 @@ impl GuardWorker {
             .find(|account| account.id == id)
             .ok_or_else(|| "账号不存在".to_string())?;
         account.enabled = enabled;
+        if let Some(id) = preserved_session_account {
+            self.config.active_account_id = Some(id);
+        } else if was_active && !enabled {
+            self.config.active_account_id = self
+                .config
+                .accounts
+                .iter()
+                .find(|account| account.enabled)
+                .map(|account| account.id.clone());
+            if self.config.guard_enabled && self.config.active_account_id.is_some() {
+                self.state.phase = GuardPhase::Reconnecting;
+                self.next_check = Some(Instant::now());
+            } else if self.config.guard_enabled {
+                self.state.phase = GuardPhase::NeedsAction;
+                self.state.last_error = Some("没有可用的已启用账号".into());
+                self.next_check = None;
+            }
+        }
         self.save_config()?;
         fill_config_snapshot(&mut self.state, &self.config);
         Ok(Some(self.state.clone()))
@@ -372,6 +431,11 @@ impl GuardWorker {
             }
             Err(error) => {
                 self.set_error(&error);
+                self.state.phase = if self.config.guard_enabled {
+                    GuardPhase::NeedsAction
+                } else {
+                    GuardPhase::Off
+                };
                 Err(safe_error(error))
             }
         }
@@ -420,18 +484,27 @@ impl GuardWorker {
             }
             Err(target_error) => {
                 if let Some(old) = old_record {
-                    let _ = client
+                    let restored = client
                         .login(&SrunAccount {
                             username: old.username,
                             password: old.password,
                         })
                         .await;
+                    if let (Some(id), Ok(info)) = (old_id.as_deref(), restored) {
+                        self.config.active_account_id = Some(id.to_owned());
+                        let _ = self.save_config();
+                        self.set_online(id, info).await;
+                    }
                 }
                 self.set_error(&target_error);
-                Err(format!(
+                let message = format!(
                     "目标账号切换失败，已尝试恢复原账号：{}",
                     safe_error(target_error)
-                ))
+                );
+                if !self.state.online {
+                    self.state.phase = GuardPhase::NeedsAction;
+                }
+                Err(message)
             }
         }
     }
@@ -473,7 +546,17 @@ impl GuardWorker {
                 self.failure_count = 0;
                 self.network_backoff_step = 0;
                 self.account_backoff_step = 0;
-                self.set_online(&active_id, info).await;
+                let account_id = self.account_id_for_session(&info);
+                if let Some(id) = &account_id {
+                    self.config.active_account_id = Some(id.clone());
+                    self.mark_verified(id);
+                    let _ = self.save_config();
+                } else {
+                    self.config.active_account_id = None;
+                    let _ = self.save_config();
+                }
+                self.set_online(account_id.as_deref().unwrap_or_default(), info)
+                    .await;
                 self.schedule_online_check();
             }
             Ok(info) if !info.is_online() => {
@@ -642,7 +725,7 @@ impl GuardWorker {
         self.account_backoff_step = 0;
         self.state.phase = GuardPhase::Online;
         self.state.online = true;
-        self.state.active_account_id = Some(account_id.to_owned());
+        self.state.active_account_id = (!account_id.is_empty()).then(|| account_id.to_owned());
         self.state.user = Some(user_snapshot(&info, &self.config));
         self.state.last_error = None;
         self.state.next_retry_at = None;
@@ -705,6 +788,20 @@ impl GuardWorker {
             .or_else(|| self.config.accounts.iter().find(|account| account.enabled))
     }
 
+    fn account_id_for_session(&self, info: &UserInfo) -> Option<String> {
+        let actual = info.display_username()?;
+        let domain = self
+            .config
+            .portal
+            .as_ref()
+            .map(|portal| portal.domain.as_str())
+            .unwrap_or_default();
+        self.config.accounts.iter().find_map(|account| {
+            same_portal_identity(actual, &build_username(&account.username, domain))
+                .then(|| account.id.clone())
+        })
+    }
+
     fn cached_client(&mut self) -> std::result::Result<PortalClient, SrunError> {
         let profile = self
             .config
@@ -722,7 +819,7 @@ impl GuardWorker {
     }
 
     fn save_config(&self) -> std::result::Result<(), String> {
-        save_config(&self.paths, &self.config).map_err(|error| error.to_string())
+        save_config(&self.paths, &self.config).map_err(|error| format!("{error:#}"))
     }
 
     async fn publish(&mut self) {

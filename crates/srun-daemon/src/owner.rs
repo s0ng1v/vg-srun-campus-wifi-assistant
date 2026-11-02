@@ -3,6 +3,9 @@ use std::{fs, path::Path, process::Command};
 use anyhow::{Context, Result};
 
 pub fn resolve(data_root: &Path) -> Result<String> {
+    if let Some(sid) = registry_owner_sid().filter(|sid| valid_sid(sid)) {
+        return Ok(sid);
+    }
     let owner_file = data_root.join("owner.sid");
     let sid = if owner_file.is_file() {
         fs::read_to_string(&owner_file)
@@ -16,6 +19,16 @@ pub fn resolve(data_root: &Path) -> Result<String> {
         anyhow::bail!("命名管道所有者 SID 无效");
     }
     Ok(sid)
+}
+
+fn registry_owner_sid() -> Option<String> {
+    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"Software\VGCampusWifiAssistant")
+        .and_then(|key| key.get_value::<String, _>("OwnerSid"))
+        .ok()
+        .map(|sid| sid.trim().to_owned())
 }
 
 fn current_user_sid() -> Option<String> {
