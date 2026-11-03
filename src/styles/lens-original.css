@@ -291,6 +291,10 @@ textarea,
   text-shadow: 0 1px 1px rgb(255 255 255 / 0.18);
 }
 
+.vg-guard-heading h2 > span {
+  display: inline-block;
+}
+
 .vg-guard-lens {
   position: relative;
   display: grid;

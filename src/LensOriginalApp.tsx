@@ -152,7 +152,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.10",
+  daemon_version: "0.1.11",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -418,7 +418,9 @@ function NetworkGuard({
                 />
                 <ShieldCheck className="vg-guard-shield" aria-hidden="true" />
               </span>
-              <h2>网络守护</h2>
+              <h2>
+                <AnimatedSpan value={enabled ? "网络守护中" : "网络守护未开启"} />
+              </h2>
             </div>
             <p className="vg-guard-description">
               <span>网络守护会在开机时自动登录校园网</span>
@@ -428,13 +430,7 @@ function NetworkGuard({
             <div className="vg-resource-row" aria-label="守护进程资源占用">
               <span><Cpu /><span>CPU</span><strong className="vg-selectable">{enabled ? `${cpuPercent.toFixed(2)} %` : "—"}</strong></span>
               <span><MemoryStick /><span>内存</span><strong className="vg-selectable">{enabled && memoryBytes ? `${(memoryBytes / 1024 / 1024).toFixed(2)} MB` : "—"}</strong></span>
-              <span className="vg-runtime-note">
-                <AnimatedSpan
-                  className="vg-sample-note"
-                  value={enabled ? "网络守护中" : "网络守护未开启"}
-                />
-                <span className="vg-process-name" title="可在任务管理器中搜索此进程名">vg-campus-daemon.exe</span>
-              </span>
+              <span className="vg-process-name" title="可在任务管理器中搜索此进程名">vg-campus-daemon.exe</span>
             </div>
           </div>
         )}
@@ -1465,7 +1461,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.10</b></span>
+          <span>VG校园网助手 <b>0.1.11</b></span>
         </footer>
       </div>
 
@@ -1581,7 +1577,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.10 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.11 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"

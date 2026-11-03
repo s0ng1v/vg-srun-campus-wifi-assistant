@@ -378,6 +378,7 @@ export function LensChoiceAction({
     if (!handle) return;
     const button = handle.element.querySelector<HTMLButtonElement>('button[data-choice="switch"]');
     const isSelected = handle.value === "switch";
+    const becameSelected = selected && !isSelected;
 
     if (selected && !isSelected) {
       handle.setValue("switch");
@@ -390,6 +391,22 @@ export function LensChoiceAction({
       button.setAttribute("aria-label", label);
       const text = button.querySelector("span");
       if (text) animateTextChange(text, label);
+    }
+
+    if (becameSelected && button && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      requestAnimationFrame(() => {
+        const beam = button.querySelector<HTMLElement>(".lg-optic-beam");
+        if (!beam || !button.isConnected) return;
+        beam.getAnimations().forEach(animation => animation.cancel());
+        beam.animate(
+          [
+            { transform: "rotate(-100deg)", opacity: 0 },
+            { opacity: 0.92, offset: 0.18 },
+            { transform: "rotate(260deg)", opacity: 0 },
+          ],
+          { duration: 980, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+        );
+      });
     }
   }, [disabled, label, selected]);
 
