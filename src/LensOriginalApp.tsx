@@ -152,7 +152,7 @@ const START_DURATION = 2700;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.8",
+  daemon_version: "0.1.9",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -901,7 +901,7 @@ export default function LensOriginalApp() {
     }
     void refresh();
     const poll = setInterval(() => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden && !busyRef.current) void refresh();
     }, 2000);
     return () => {
       disposed = true;
@@ -1175,23 +1175,59 @@ export default function LensOriginalApp() {
       lensToast.success(`${account.username} 验证成功`);
       return;
     }
+    const previousId = activeId;
+    if (!previousId) {
+      lensToast.error("没有可恢复的原账号");
+      return;
+    }
     const nextBusy: BusyState = { kind: "verify", accountId: account.id };
     busyRef.current = nextBusy;
     setBusy(nextBusy);
     try {
-      const snapshot = await executeCommand({ type: "verify_account", id: account.id });
-      const verifiedAccount = snapshot.accounts.find(entry => entry.id === account.id);
-      if (verifiedAccount?.verified) {
-        if (snapshot.online && snapshot.active_account_id !== account.id) {
-          lensToast.success(`${account.username} 验证成功，已恢复原账号`);
-        } else {
-          lensToast.error(`${account.username} 验证成功，但原账号恢复失败，已保持验证账号在线`);
-        }
-      } else {
-        lensToast.error(`${account.username} 验证失败，请检查账号或密码；已恢复原账号`);
+      let switched: DaemonSnapshot | null = null;
+      try {
+        switched = await sendDaemonCommand({ type: "switch_account", id: account.id });
+      } catch (switchError) {
+        const failedSnapshot = await getDaemonSnapshot().catch(() => null);
+        if (failedSnapshot) applySnapshot(failedSnapshot);
+        lensToast.error(
+          switchError instanceof Error
+            ? `${switchError.message} 请检查 ${account.username} 的账号或密码`
+            : `${account.username} 验证失败，请检查账号或密码`,
+        );
+        return;
       }
-    } catch (error) {
-      lensToast.error(error instanceof Error ? error.message : "账号验证失败");
+      const targetState = switched?.accounts.find(entry => entry.id === account.id);
+      if (!switched?.online || !targetState?.verified || switched.active_account_id !== account.id) {
+        const snapshot = await getDaemonSnapshot().catch(() => switched);
+        if (snapshot) applySnapshot(snapshot);
+        lensToast.error(`${account.username} 验证失败，请检查账号或密码`);
+        return;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      let restored: DaemonSnapshot | null = null;
+      let restoreError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const candidate = await sendDaemonCommand({ type: "switch_account", id: previousId });
+          if (candidate) {
+            restored = candidate;
+            if (candidate.online && candidate.active_account_id === previousId) break;
+          }
+        } catch (error) {
+          restoreError = error;
+        }
+        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+      const finalSnapshot = restored ?? await getDaemonSnapshot().catch(() => null);
+      if (finalSnapshot) applySnapshot(finalSnapshot);
+      if (finalSnapshot?.online && finalSnapshot.active_account_id === previousId) {
+        lensToast.success(`${account.username} 验证成功，已恢复原账号`);
+      } else {
+        const detail = restoreError instanceof Error ? `：${restoreError.message}` : "";
+        lensToast.error(`${account.username} 验证成功，但原账号恢复失败${detail}`);
+      }
     } finally {
       busyRef.current = null;
       setBusy(null);
@@ -1373,7 +1409,7 @@ export default function LensOriginalApp() {
                             online={online}
                             index={index}
                             count={accounts.length}
-                            loggingIn={busy?.accountId === account.id}
+                            loggingIn={busy?.accountId === account.id && busy.kind !== "verify"}
                             verifying={busy?.kind === "verify" && busy.accountId === account.id}
                             switchDisabled={Boolean(busy)}
                             onSwitch={() => switchAccount(account)}
@@ -1429,7 +1465,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.8</b></span>
+          <span>VG校园网助手 <b>0.1.9</b></span>
         </footer>
       </div>
 
@@ -1545,7 +1581,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.8 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.9 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"
