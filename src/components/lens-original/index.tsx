@@ -994,6 +994,8 @@ type NotificationTone = "success" | "error" | "info";
 type ToastEntry = { id: number; tone: NotificationTone; message: string; closing: boolean };
 type ToastListener = (entry: ToastEntry) => void;
 
+const TOAST_LIFETIME_MS = 1300;
+const TOAST_EXIT_MS = 200;
 const toastListeners = new Set<ToastListener>();
 let nextToastId = 0;
 
@@ -1038,7 +1040,7 @@ function LensNotificationItem({
       onDismiss: () => {
         handle.element.hidden = false;
         handle.element.classList.add("is-closing");
-        dismissTimer = window.setTimeout(() => dismissRef.current(), 200);
+        dismissTimer = window.setTimeout(() => dismissRef.current(), TOAST_EXIT_MS);
       },
     });
     handle.element.classList.add("vg-toast");
@@ -1082,8 +1084,8 @@ export function LensNotificationHost() {
           setEntries(current => current.map(item => (
             item.id === entry.id ? { ...item, closing: true } : item
           )));
-        }, 1300),
-        setTimeout(() => dismiss(entry.id), 1500),
+        }, TOAST_LIFETIME_MS - TOAST_EXIT_MS),
+        setTimeout(() => dismiss(entry.id), TOAST_LIFETIME_MS),
       ]);
     };
     toastListeners.add(listener);

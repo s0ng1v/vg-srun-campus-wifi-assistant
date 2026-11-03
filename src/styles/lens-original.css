@@ -321,9 +321,7 @@ textarea,
 .vg-guard-lens[data-active="true"] .lg-optic-rim {
   --lg-optical-color: #ffffff;
   display: block !important;
-  filter:
-    drop-shadow(0 0 1.5px rgb(32 73 61 / 0.56))
-    drop-shadow(0 0 6px rgb(255 255 255 / 0.92));
+  filter: drop-shadow(0 0 5px rgb(255 255 255 / 0.92));
 }
 
 .vg-stage[data-scene="ocean"] .vg-guard-lens[data-active="true"] .lg-optic-rim {
@@ -335,10 +333,17 @@ textarea,
 
 .vg-guard-lens[data-active="true"] .lg-optic-beam {
   opacity: 1;
+  background: conic-gradient(
+    from 0deg,
+    rgb(255 255 255 / 0) 0deg 245deg,
+    rgb(255 255 255 / 0.18) 278deg,
+    #fff 300deg,
+    #fff 309deg,
+    rgb(255 255 255 / 0.14) 325deg,
+    rgb(255 255 255 / 0) 338deg
+  );
   animation: vg-guard-lens-orbit 2600ms linear infinite;
-  filter:
-    brightness(1.08)
-    drop-shadow(0 0 2px rgb(255 255 255 / 0.95));
+  filter: drop-shadow(0 0 1.5px rgb(255 255 255 / 0.9));
   will-change: transform;
 }
 
