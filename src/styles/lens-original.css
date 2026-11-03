@@ -1059,7 +1059,12 @@ textarea,
 
 .vg-account-choice .lg-choice > .lg-optic-rim {
   display: block !important;
+  opacity: 0;
   filter: drop-shadow(0 0 4px rgb(255 255 255 / 0.9));
+}
+
+.vg-account-choice .lg-choice[aria-pressed="true"] > .lg-optic-rim {
+  opacity: 1;
 }
 
 .vg-account-choice .lg-choice > .lg-optic-rim > .lg-optic-beam {

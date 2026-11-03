@@ -352,7 +352,12 @@ export function LensChoiceAction({
       value: selectedRef.current ? "switch" : "idle",
       selectionColor: "green",
       onChange: value => {
-        if (value === "switch") actionRef.current();
+        if (value === "switch") {
+          actionRef.current();
+          requestAnimationFrame(() => {
+            if (!selectedRef.current) handleRef.current?.setValue("idle");
+          });
+        }
       },
     });
     assignClass(handle.element, className);
