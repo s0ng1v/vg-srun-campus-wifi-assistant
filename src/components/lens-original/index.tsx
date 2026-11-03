@@ -334,6 +334,7 @@ export function LensChoiceAction({
   const handleRef = useRef<ValueHandle<string> | null>(null);
   const actionRef = useRef(onPress);
   const selectedRef = useRef(selected);
+  const onlineSelectedRef = useRef(selected);
   selectedRef.current = selected;
 
   useEffect(() => {
@@ -383,7 +384,8 @@ export function LensChoiceAction({
     if (!handle) return;
     const button = handle.element.querySelector<HTMLButtonElement>('button[data-choice="switch"]');
     const isSelected = handle.value === "switch";
-    const becameSelected = selected && !isSelected;
+    const showSuccessLight = selected && label === "在线" && !onlineSelectedRef.current;
+    onlineSelectedRef.current = selected && label === "在线";
 
     if (selected && !isSelected) {
       handle.setValue("switch");
@@ -398,19 +400,15 @@ export function LensChoiceAction({
       if (text) animateTextChange(text, label);
     }
 
-    if (becameSelected && button && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (showSuccessLight && button && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
       requestAnimationFrame(() => {
         const beam = button.querySelector<HTMLElement>(".lg-optic-beam");
         if (!beam || !button.isConnected) return;
         beam.getAnimations().forEach(animation => animation.cancel());
-        beam.animate(
-          [
-            { transform: "rotate(-100deg)", opacity: 0 },
-            { opacity: 0.92, offset: 0.18 },
-            { transform: "rotate(260deg)", opacity: 0 },
-          ],
-          { duration: 980, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
-        );
+        button.dataset.successLight = "true";
+        beam.addEventListener("animationend", () => {
+          delete button.dataset.successLight;
+        }, { once: true });
       });
     }
   }, [disabled, label, selected]);

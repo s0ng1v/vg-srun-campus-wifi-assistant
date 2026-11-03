@@ -397,6 +397,10 @@ textarea,
   animation: vg-guard-progress-out 220ms cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
+.vg-guard-progress.is-error .lg-progress-heading {
+  color: #9a4149;
+}
+
 .vg-guard-normal {
   width: 100%;
   animation: vg-guard-content-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -1078,6 +1082,26 @@ textarea,
     rgb(255 255 255 / 0) 338deg
   );
   filter: drop-shadow(0 0 1.5px rgb(255 255 255 / 0.9));
+}
+
+.vg-account-choice .lg-choice[data-success-light="true"] > .lg-optic-rim > .lg-optic-beam {
+  animation: vg-account-choice-orbit 980ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes vg-account-choice-orbit {
+  from {
+    opacity: 0;
+    transform: rotate(-100deg);
+  }
+
+  18% {
+    opacity: 0.94;
+  }
+
+  to {
+    opacity: 0;
+    transform: rotate(260deg);
+  }
 }
 
 .vg-account-choice .lg-choice:disabled {

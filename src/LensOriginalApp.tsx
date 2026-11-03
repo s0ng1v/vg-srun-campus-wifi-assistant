@@ -61,6 +61,11 @@ import {
 type Account = AccountSummary;
 type FormState = { mode: "add" | "edit"; id?: string; username: string; verified?: boolean };
 type BusyState = { kind: "login" | "switch" | "verify"; accountId: string } | null;
+type SwitchFlow = {
+  key: string;
+  target: string;
+  state: "working" | "success" | "error";
+} | null;
 type WindowSize = "compact" | "standard" | "large";
 type WindowRatio = "4:3" | "3:2" | "16:10" | "16:9";
 type WindowMetrics = { width: number; height: number };
@@ -149,10 +154,17 @@ const START_STAGES = [
   { at: 2700, label: "网络守护中" },
 ];
 const START_DURATION = 2700;
+const SWITCH_STAGES = [
+  { at: 0, label: "正在注销当前账号" },
+  { at: 1700, label: "正在登录目标账号" },
+  { at: 4100, label: "正在确认网络连接" },
+  { at: 6800, label: "正在完成切号" },
+];
+const SWITCH_PROGRESS_DURATION = 7400;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.12",
+  daemon_version: "0.1.13",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -289,6 +301,7 @@ function Brand() {
 function NetworkGuard({
   enabled,
   phase,
+  switchFlow,
   cpuPercent,
   memoryBytes,
   onChange,
@@ -296,6 +309,7 @@ function NetworkGuard({
 }: {
   enabled: boolean;
   phase: GuardPhase;
+  switchFlow: SwitchFlow;
   cpuPercent: number;
   memoryBytes: number;
   onChange: (enabled: boolean) => Promise<void>;
@@ -305,13 +319,72 @@ function NetworkGuard({
   const [progressClosing, setProgressClosing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [stage, setStage] = useState(START_STAGES[0].label);
+  const [switchOpen, setSwitchOpen] = useState(false);
+  const [switchClosing, setSwitchClosing] = useState(false);
+  const [switchProgress, setSwitchProgress] = useState(0);
+  const [switchStage, setSwitchStage] = useState(SWITCH_STAGES[0].label);
   const progressFrame = useRef<number>();
   const finishTimer = useRef<ReturnType<typeof setTimeout>>();
+  const switchFrame = useRef<number>();
+  const switchFinishTimer = useRef<ReturnType<typeof setTimeout>>();
 
   useEffect(() => () => {
     if (progressFrame.current) cancelAnimationFrame(progressFrame.current);
     if (finishTimer.current) clearTimeout(finishTimer.current);
+    if (switchFrame.current) cancelAnimationFrame(switchFrame.current);
+    if (switchFinishTimer.current) clearTimeout(switchFinishTimer.current);
   }, []);
+
+  useEffect(() => {
+    if (!switchFlow) return;
+    if (switchFlow.state === "working") {
+      if (switchFrame.current) cancelAnimationFrame(switchFrame.current);
+      if (switchFinishTimer.current) clearTimeout(switchFinishTimer.current);
+      setSwitchOpen(true);
+      setSwitchClosing(false);
+      setSwitchProgress(4);
+      setSwitchStage(SWITCH_STAGES[0].label);
+      const startedAt = performance.now();
+      const tick = (now: number) => {
+        const elapsed = Math.min(now - startedAt, SWITCH_PROGRESS_DURATION);
+        const nextIndex = SWITCH_STAGES.findIndex(item => elapsed <= item.at);
+        const stageIndex = nextIndex === -1 ? SWITCH_STAGES.length - 1 : nextIndex;
+        const linear = Math.min(elapsed / SWITCH_PROGRESS_DURATION, 0.9);
+        const eased = linear * linear * (3 - 2 * linear);
+        setSwitchProgress(4 + 84 * eased);
+        setSwitchStage(
+          stageIndex === 1
+            ? `正在登录 ${switchFlow.target}`
+            : SWITCH_STAGES[stageIndex].label,
+        );
+        if (elapsed < SWITCH_PROGRESS_DURATION) {
+          switchFrame.current = requestAnimationFrame(tick);
+        }
+      };
+      switchFrame.current = requestAnimationFrame(tick);
+      return () => {
+        if (switchFrame.current) cancelAnimationFrame(switchFrame.current);
+      };
+    }
+
+    if (switchFrame.current) cancelAnimationFrame(switchFrame.current);
+    setSwitchProgress(100);
+    setSwitchStage(
+      switchFlow.state === "success"
+        ? `${switchFlow.target} 切换完成`
+        : `${switchFlow.target} 切换未完成`,
+    );
+    switchFinishTimer.current = setTimeout(() => {
+      setSwitchClosing(true);
+      switchFinishTimer.current = setTimeout(() => {
+        setSwitchOpen(false);
+        setSwitchClosing(false);
+      }, 220);
+    }, 850);
+    return () => {
+      if (switchFinishTimer.current) clearTimeout(switchFinishTimer.current);
+    };
+  }, [switchFlow?.key, switchFlow?.state, switchFlow?.target]);
 
   async function changeGuard(next: boolean) {
     if (!next) {
@@ -406,6 +479,23 @@ function NetworkGuard({
               animate={progress >= 100}
             />
           </div>
+        ) : switchOpen ? (
+          <div
+            className={cn(
+              "vg-guard-progress",
+              switchClosing && "is-closing",
+              switchFlow?.state === "error" && "is-error",
+            )}
+            role="status"
+            aria-live="polite"
+          >
+            <LensProgress
+              label="账号切换进度"
+              statusLabel={switchStage}
+              value={switchProgress}
+              animate={switchProgress >= 100}
+            />
+          </div>
         ) : (
           <div className="vg-guard-normal">
             <div className="vg-guard-heading">
@@ -446,7 +536,7 @@ function NetworkGuard({
         <LensSwitch
           label="网络守护"
           checked={enabled || starting}
-          disabled={starting}
+          disabled={starting || switchOpen}
           onChange={changeGuard}
         />
       </div>
@@ -837,6 +927,7 @@ export default function LensOriginalApp() {
   const [activeId, setActiveId] = useState(initialSnapshot.active_account_id ?? "");
   const [online, setOnline] = useState(initialSnapshot.online);
   const [busy, setBusy] = useState<BusyState>(null);
+  const [switchFlow, setSwitchFlow] = useState<SwitchFlow>(null);
   const [guard, setGuard] = useState(initialSnapshot.guard_enabled);
   const [phase, setPhase] = useState<GuardPhase>(initialSnapshot.phase);
   const [portal, setPortal] = useState(initialSnapshot.portal);
@@ -1149,16 +1240,24 @@ export default function LensOriginalApp() {
       return;
     }
     const nextBusy: BusyState = { kind: "switch", accountId: account.id };
+    const flowKey = crypto.randomUUID();
     busyRef.current = nextBusy;
     setBusy(nextBusy);
+    setSwitchFlow({ key: flowKey, target: account.username, state: "working" });
+    let outcome: "success" | "error" = "error";
     try {
       await executeCommand({ type: "switch_account", id: account.id });
+      outcome = "success";
       lensToast.success(`已切换到 ${account.username}`);
     } catch (error) {
       lensToast.error(error instanceof Error ? error.message : "账号切换失败");
     } finally {
+      setSwitchFlow({ key: flowKey, target: account.username, state: outcome });
       busyRef.current = null;
       setBusy(null);
+      window.setTimeout(() => {
+        setSwitchFlow(current => current?.key === flowKey ? null : current);
+      }, 1150);
     }
   }
 
@@ -1321,6 +1420,7 @@ export default function LensOriginalApp() {
               <NetworkGuard
                 enabled={guard}
                 phase={!daemonConnected && guard ? "crashed" : phase}
+                switchFlow={switchFlow}
                 cpuPercent={metrics.process_cpu_percent}
                 memoryBytes={metrics.process_memory_bytes}
                 onChange={handleGuardChange}
@@ -1461,7 +1561,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.12</b></span>
+          <span>VG校园网助手 <b>0.1.13</b></span>
         </footer>
       </div>
 
@@ -1577,7 +1677,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.12 · 不进行后台更新检查</span>
+              <span>当前版本 0.1.13 · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"
