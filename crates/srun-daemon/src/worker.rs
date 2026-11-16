@@ -39,6 +39,13 @@ const ACCOUNT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(600),
     Duration::from_secs(1800),
 ];
+// 不在校园网（门户不可达）时的重新探测节奏：先快后慢，网络切换事件会立即唤醒。
+const OFF_CAMPUS_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(180),
+    Duration::from_secs(300),
+];
 
 pub struct GuardWorker {
     paths: AppPaths,
@@ -50,6 +57,8 @@ pub struct GuardWorker {
     failure_count: u32,
     network_backoff_step: usize,
     account_backoff_step: usize,
+    off_campus_step: usize,
+    portal_misses: u32,
     outage_started: Option<Instant>,
     outage_notified: bool,
     action_notification: Option<String>,
@@ -83,6 +92,8 @@ impl GuardWorker {
             failure_count: 0,
             network_backoff_step: 0,
             account_backoff_step: 0,
+            off_campus_step: 0,
+            portal_misses: 0,
             outage_started: None,
             outage_notified: false,
             action_notification: None,
@@ -189,6 +200,8 @@ impl GuardWorker {
         self.failure_count = 0;
         self.network_backoff_step = 0;
         self.account_backoff_step = 0;
+        self.off_campus_step = 0;
+        self.portal_misses = 0;
         self.outage_started = None;
         self.outage_notified = false;
         self.action_notification = None;
@@ -730,6 +743,8 @@ impl GuardWorker {
 
         match portal_result {
             Ok(info) if info.is_online() && external == ExternalProbe::Reachable => {
+                self.off_campus_step = 0;
+                self.portal_misses = 0;
                 self.failure_count = 0;
                 self.network_backoff_step = 0;
                 self.account_backoff_step = 0;
@@ -747,18 +762,58 @@ impl GuardWorker {
                 self.schedule_online_check();
             }
             Ok(info) if !info.is_online() => {
+                self.off_campus_step = 0;
+                self.portal_misses = 0;
                 self.failure_count = 0;
                 self.network_backoff_step = 0;
                 self.authenticate(client).await;
             }
             Ok(_) => {
+                self.off_campus_step = 0;
+                self.portal_misses = 0;
                 self.health_failure().await;
             }
+            Err(error) if portal_unreachable(&error) => {
+                self.portal_misses += 1;
+                // 首次不可达可能只是 Wi-Fi 漫游或短暂抖动，复核一次再进入静默等待。
+                if self.portal_misses < 2 {
+                    self.state.phase = GuardPhase::Suspicious;
+                    self.state.last_error = None;
+                    self.next_check = Some(Instant::now() + FIRST_FAILURE_RECHECK);
+                } else {
+                    self.standby_off_campus();
+                }
+            }
             Err(error) => {
+                self.off_campus_step = 0;
+                self.portal_misses = 0;
                 self.set_error(&error);
                 self.health_failure().await;
             }
         }
+    }
+
+    /// 不在校园网（门户不可达，如家里 Wi-Fi、手机热点）：静默等待。
+    /// 不发断网通知、不尝试账号，仅做低频探测；网络接口变化会立即唤醒检查。
+    fn standby_off_campus(&mut self) {
+        if self.off_campus_step == 0 {
+            logging::info("未检测到校园网门户，进入静默等待（不发送通知），连接校园网后会自动恢复");
+        }
+        self.state.phase = GuardPhase::WaitingNetwork;
+        self.state.online = false;
+        self.state.user = None;
+        self.state.last_error = None;
+        self.state.next_retry_at = None;
+        self.failure_count = 0;
+        self.network_backoff_step = 0;
+        self.account_backoff_step = 0;
+        // 离开校园网时清空断网通知状态：既不补发“已恢复”，也不残留旧记录。
+        self.outage_started = None;
+        self.outage_notified = false;
+        self.action_notification = None;
+        let wait = OFF_CAMPUS_BACKOFF[self.off_campus_step.min(OFF_CAMPUS_BACKOFF.len() - 1)];
+        self.off_campus_step = (self.off_campus_step + 1).min(OFF_CAMPUS_BACKOFF.len() - 1);
+        self.next_check = Some(Instant::now() + wait);
     }
 
     async fn health_failure(&mut self) {
@@ -910,6 +965,8 @@ impl GuardWorker {
         self.failure_count = 0;
         self.network_backoff_step = 0;
         self.account_backoff_step = 0;
+        self.off_campus_step = 0;
+        self.portal_misses = 0;
         self.state.phase = GuardPhase::Online;
         self.state.online = true;
         self.state.active_account_id = (!account_id.is_empty()).then(|| account_id.to_owned());
@@ -1215,6 +1272,13 @@ fn is_transient(error: &SrunError) -> bool {
     )
 }
 
+/// 门户完全不可达（DNS/连接失败，或返回的不是深澜门户内容）。
+/// 这通常意味着当前接的是别的网络（家里 Wi-Fi、手机热点等），
+/// 属于可预期场景，应静默等待而不是按“校园网断线”告警。
+fn portal_unreachable(error: &SrunError) -> bool {
+    is_transient(error)
+}
+
 fn safe_error(error: SrunError) -> String {
     safe_error_ref(&error)
 }
@@ -1260,5 +1324,106 @@ mod tests {
         let profile =
             portal_profile_from_login_url("http://portal.example.edu.cn?ac_id=5").unwrap();
         assert_eq!(profile.base_url, "https://portal.example.edu.cn");
+    }
+
+    #[test]
+    fn unreachable_portal_counts_as_off_campus() {
+        assert!(portal_unreachable(&SrunError::InvalidResponse(
+            "html".into()
+        )));
+        let rate_limited = SrunError::Login(srun_core::LoginFailure::new(
+            LoginFailureKind::Unknown,
+            "speed_limit_error",
+            "门户查询频率受限",
+        ));
+        assert!(!portal_unreachable(&rate_limited));
+    }
+
+    #[tokio::test]
+    async fn connection_failure_surfaces_as_transport_error() {
+        // 校外（家里 Wi-Fi / 热点）访问不到校园门户时，错误必须是 Transport，
+        // 这样 perform_cycle 才会走静默等待而不是断网告警。
+        let client = srun_core::PortalClient::new(srun_core::PortalProfile {
+            base_url: "https://127.0.0.1:9".into(),
+            ac_id: "5".into(),
+            domain: String::new(),
+            service_url: None,
+        })
+        .unwrap();
+        let error = client
+            .get_user_info_settled(Duration::from_secs(2))
+            .await
+            .expect_err("连接到关闭的端口必须失败");
+        assert!(portal_unreachable(&error));
+    }
+
+    #[tokio::test]
+    async fn off_campus_standby_is_quiet() {
+        use std::sync::Arc;
+
+        use tokio::sync::RwLock;
+
+        let root = std::env::temp_dir().join(format!("vg-campus-offcampus-{}", Uuid::new_v4()));
+        let paths = AppPaths::from_root(&root).unwrap();
+        let config = AppConfig {
+            guard_enabled: true,
+            portal: Some(srun_core::PortalProfile {
+                base_url: "https://127.0.0.1:9".into(),
+                ac_id: "5".into(),
+                domain: String::new(),
+                service_url: None,
+            }),
+            accounts: vec![AccountMeta {
+                id: "acct".into(),
+                username: "006782".into(),
+                enabled: true,
+                verified: true,
+                verification_failed: false,
+            }],
+            active_account_id: Some("acct".into()),
+            ..AppConfig::default()
+        };
+        save_config(&paths, &config).unwrap();
+        let mut vault = CredentialVault::load(&paths.credentials).unwrap();
+        vault
+            .upsert(CredentialRecord {
+                id: "acct".into(),
+                username: "006782".into(),
+                password: "test-only".into(),
+            })
+            .unwrap();
+        vault.save(&paths.credentials).unwrap();
+
+        let snapshot: SharedSnapshot = Arc::new(RwLock::new(DaemonSnapshot::default()));
+        let worker = GuardWorker::load(paths.clone(), Arc::clone(&snapshot)).unwrap();
+        let (sender, receiver) = mpsc::channel(4);
+        let (_net_sender, net_receiver) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(worker.run(receiver, net_receiver));
+
+        // 门户不可达：首轮失败先复核，第二轮仍失败后进入静默等待。
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let phase = snapshot.read().await.phase;
+            if phase == GuardPhase::WaitingNetwork {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "未在预期时间内进入静默等待，当前状态：{phase:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        let state = snapshot.read().await.clone();
+        assert!(!state.online);
+        assert!(state.last_error.is_none());
+        assert!(state.next_retry_at.is_none());
+        assert!(
+            !root.join("notification-event.txt").exists(),
+            "非校园网场景不应写入任何通知事件"
+        );
+
+        drop(sender);
+        handle.await.unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

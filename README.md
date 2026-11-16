@@ -16,6 +16,7 @@ VG 校园网助手是一个面向 Windows 10/11 的深澜 Web Portal 自动认�
 - GUI 完全退出后继续守护
 - 本地加密保存凭据，无遥测
 - 状态变化与持续断网通知
+- 连接非校园网（如家里 Wi-Fi、手机热点）时静默等待，不发送断网通知
 
 暂不支持 802.1X、PPPoE、验证码、短信验证和多学校门户并存。
 
@@ -45,9 +46,14 @@ npm run build
 - `vg-campus-notifier.exe`
 - `vg-campus-setup.exe`
 
-源码阶段首次开启守护时会请求一次管理员权限，由 setup helper 注册开机任务和
-用户会话通知任务，并把运行文件复制到 Program Files 的受保护目录。正式
-Setup.exe 安装器仍在后续里程碑中。
+单文件安装包（NSIS，按机器安装到 `C:\Program Files\VG校园网助手`）：
+
+- `target/release/bundle/nsis/VG校园网助手_<version>_x64-setup.exe`
+
+安装包会把守护、通知和 setup helper 一并放到主程序旁边。首次开启网络守护时
+仍会请求一次管理员权限，由 setup helper 注册开机任务和用户会话通知任务，并把
+运行文件复制到 `C:\Program Files\VGCampusWifiAssistant` 的受保护目录；卸载时
+安装器会自动移除这些系统任务，`%ProgramData%` 下的用户数据保留。
 
 ## 验证
 

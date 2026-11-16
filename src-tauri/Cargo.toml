@@ -17,4 +17,8 @@ srun-ipc = { path = "../crates/srun-ipc" }
 tauri = { version = "2.8.2", features = [] }
 tauri-plugin-opener = "2"
 tokio.workspace = true
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+] }
 

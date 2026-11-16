@@ -263,6 +263,7 @@ export function LensPanel({
 export function LensActionButton({
   label,
   ariaLabel,
+  title,
   variant = "default",
   className,
   disabled = false,
@@ -271,6 +272,7 @@ export function LensActionButton({
 }: {
   label: string;
   ariaLabel?: string;
+  title?: string;
   variant?: "default" | "success";
   className?: string;
   disabled?: boolean;
@@ -297,6 +299,7 @@ export function LensActionButton({
       onPress: () => actionRef.current(),
     });
     if (ariaLabel) handle.element.setAttribute("aria-label", ariaLabel);
+    if (title) handle.element.setAttribute("title", title);
     assignClass(handle.element, className);
     handle.element.classList.add("vg-lens-button");
     handleRef.current = handle;
@@ -307,7 +310,7 @@ export function LensActionButton({
       handle.destroy();
       handle.element.remove();
     };
-  }, [ariaLabel, className, disabled, label, runtime, sound, variant]);
+  }, [ariaLabel, className, disabled, label, runtime, sound, title, variant]);
 
   useEffect(() => {
     handleRef.current?.setDisabled(disabled);

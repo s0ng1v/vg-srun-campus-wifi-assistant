@@ -147,6 +147,15 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let notifier_xml = notifier_task_xml(&installed.notifier, &owner_sid)?;
     register_task(NOTIFIER_TASK_NAME, &notifier_xml)?;
     register_protocol(&installed.gui)?;
+    // 重新安装/升级时先结束仍在运行的旧守护进程，否则旧版本会继续占用本地管道，
+    // 新版本要等到下次重启才会生效。结束命令返回后进程可能尚未完全退出，
+    // 稍等片刻再启动，并在失败时补试一次（已运行时会直接报错，可忽略）。
+    let _ =
+        run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_ONDEMAND_TASK_NAME]));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
+    std::thread::sleep(std::time::Duration::from_millis(900));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/Run", "/TN", DAEMON_TASK_NAME]));
+    std::thread::sleep(std::time::Duration::from_millis(1500));
     let _ = run_hidden(Command::new("schtasks.exe").args(["/Run", "/TN", DAEMON_TASK_NAME]));
     log("系统守护任务与通知任务已安装");
     if let Some(path) = &options.ready_file {

@@ -104,6 +104,27 @@ fn exit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// Windows 11 会给每个窗口外沿画一圈 1px 描边（DWMWA_BORDER_COLOR）。
+/// 本应用是无边框满铺窗口，圆角完全来自系统 DWM 裁剪；这圈描边在圆角
+/// 处呈现为方形拐角，而它是合成器的实时效果，屏幕截图（PrtSc 等）不会
+/// 捕获它，于是出现"屏幕上有方角、截图里只有圆角"的不一致。
+/// 设为 DWMWA_COLOR_NONE 关闭描边，让屏幕显示与截图一致。
+#[cfg(target_os = "windows")]
+fn disable_window_border(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+    const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+    if let Ok(hwnd) = window.hwnd() {
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd.0 as windows_sys::Win32::Foundation::HWND,
+                DWMWA_BORDER_COLOR as u32,
+                &DWMWA_COLOR_NONE as *const u32 as *const core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -115,6 +136,11 @@ fn main() {
         })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                disable_window_border(&window);
+                // 配置里 visible:false，等描边关闭、尺寸校准后再显示，
+                // 避免启动瞬间闪现描边或尺寸跳变。
+                window.show()?;
                 if let Some(monitor) = window.current_monitor()? {
                     let work = monitor.work_area();
                     let scale = monitor.scale_factor();

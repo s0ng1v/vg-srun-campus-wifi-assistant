@@ -6,6 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -19,6 +20,7 @@ import {
   MemoryStick,
   Minus,
   ShieldCheck,
+  TriangleAlert,
   Users,
 } from "lucide-react";
 import appIcon from "../src-tauri/icons/icon.png";
@@ -69,6 +71,18 @@ type SwitchFlow = {
 type WindowSize = "compact" | "standard" | "large";
 type WindowRatio = "4:3" | "3:2" | "16:10" | "16:9";
 type WindowMetrics = { width: number; height: number };
+type ThemeName = "light" | "dark" | "system";
+
+const THEME_CYCLE: Record<ThemeName, ThemeName> = {
+  light: "dark",
+  dark: "system",
+  system: "light",
+};
+const THEME_TOGGLE: Record<ThemeName, { icon: "sun" | "moon" | "reset"; label: string }> = {
+  light: { icon: "moon", label: "切换到深海" },
+  dark: { icon: "reset", label: "跟随系统主题" },
+  system: { icon: "sun", label: "切换到流光" },
+};
 
 const WINDOW_SIZES = {
   compact: { label: "小", height: 675 },
@@ -84,6 +98,24 @@ const WINDOW_RATIOS = {
 const WINDOW_SIZE_KEY = "vg-campus-window-size-v2";
 const WINDOW_RATIO_KEY = "vg-campus-window-ratio-v2";
 const GUARD_INTENT_KEY = "vg-campus-guard-enabled";
+const SWITCH_CONFIRM_KEY = "vg-campus-switch-confirm";
+
+function readSwitchConfirmEnabled(): boolean {
+  try {
+    return localStorage.getItem(SWITCH_CONFIRM_KEY) !== "off";
+  } catch {
+    // Storage can be unavailable in restricted preview environments.
+  }
+  return true;
+}
+
+function prefersSystemDark(): boolean {
+  try {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } catch {
+    return false;
+  }
+}
 
 function readWindowSize(): WindowSize | null {
   try {
@@ -154,17 +186,20 @@ const START_STAGES = [
   { at: 2700, label: "网络守护中" },
 ];
 const START_DURATION = 2700;
+// 阶段时间按守护进程 switch_account 的真实顺序校准：
+// 探测当前会话（约 0-2s）→ 注销（2-3.5s）→ 登录目标（3.5-5s）→ 确认连接。
 const SWITCH_STAGES = [
-  { at: 0, label: "正在注销当前账号" },
-  { at: 1700, label: "正在登录目标账号" },
-  { at: 4100, label: "正在确认网络连接" },
-  { at: 6800, label: "正在完成切号" },
+  { at: 0, label: "正在确认当前会话" },
+  { at: 2000, label: "正在注销当前账号" },
+  { at: 3900, label: "正在登录目标账号" },
+  { at: 6100, label: "正在完成切号" },
 ];
-const SWITCH_PROGRESS_DURATION = 7400;
+const SWITCH_PROGRESS_DURATION = 7000;
+const SWITCH_LOGIN_STAGE_INDEX = 2;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.13",
+  daemon_version: "0.1.16",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -236,9 +271,18 @@ function phaseLabel(phase: GuardPhase): string {
 }
 
 function formatBytes(value: number): string {
-  if (!value) return "—";
-  const gigabytes = value / 1024 ** 3;
-  return `${gigabytes.toFixed(2)} GB`;
+  if (!value) return "0 MB";
+  const megabytes = value / 1024 ** 2;
+  if (megabytes < 1024) return `${megabytes.toFixed(1)} MB`;
+  return `${(value / 1024 ** 3).toFixed(2)} GB`;
+}
+
+// needs_action 的 last_error 只有文案，没有结构化原因；
+// 按关键词给出最可能解决当前问题的入口。
+function needsActionHint(message: string): { label: string; kind: "portal" | "account" | "logs" } {
+  if (message.includes("门户")) return { label: "配置门户", kind: "portal" };
+  if (/密码|账号|余额|设备|认证|登录/.test(message)) return { label: "编辑当前账号", kind: "account" };
+  return { label: "打开日志目录", kind: "logs" };
 }
 
 function formatDuration(value: number): string {
@@ -304,16 +348,24 @@ function NetworkGuard({
   switchFlow,
   cpuPercent,
   memoryBytes,
+  errorMessage,
   onChange,
   onRepair,
+  onConfigurePortal,
+  onEditActiveAccount,
+  onOpenDiagnostics,
 }: {
   enabled: boolean;
   phase: GuardPhase;
   switchFlow: SwitchFlow;
   cpuPercent: number;
   memoryBytes: number;
+  errorMessage: string | null;
   onChange: (enabled: boolean) => Promise<void>;
   onRepair: () => Promise<void>;
+  onConfigurePortal: () => void;
+  onEditActiveAccount: () => void;
+  onOpenDiagnostics: () => void;
 }) {
   const [starting, setStarting] = useState(false);
   const [progressClosing, setProgressClosing] = useState(false);
@@ -353,7 +405,7 @@ function NetworkGuard({
         const eased = linear * linear * (3 - 2 * linear);
         setSwitchProgress(4 + 84 * eased);
         setSwitchStage(
-          stageIndex === 1
+          stageIndex === SWITCH_LOGIN_STAGE_INDEX
             ? `正在登录 ${switchFlow.target}`
             : SWITCH_STAGES[stageIndex].label,
         );
@@ -463,6 +515,11 @@ function NetworkGuard({
     }, 600);
   }
 
+  const guardAttention = enabled && (phase === "needs_action" || phase === "crashed");
+  const actionHint = phase === "needs_action" && errorMessage
+    ? needsActionHint(errorMessage)
+    : null;
+
   return (
     <LensPanel label="网络守护" className="vg-panel vg-guard-panel">
       <div className="vg-guard-copy">
@@ -499,7 +556,11 @@ function NetworkGuard({
         ) : (
           <div className="vg-guard-normal">
             <div className="vg-guard-heading">
-              <span className="vg-guard-lens" data-active={enabled}>
+              <span
+                className="vg-guard-lens"
+                data-active={enabled}
+                data-state={guardAttention ? "attention" : enabled ? "ok" : "off"}
+              >
                 <LensIconButton
                   label="网络守护连接状态"
                   icon="check"
@@ -509,14 +570,51 @@ function NetworkGuard({
                 <ShieldCheck className="vg-guard-shield" aria-hidden="true" />
               </span>
               <h2>
-                <AnimatedSpan value={enabled ? "网络守护中" : "网络守护未开启"} />
+                {/* 标题必须如实反映 phase：崩溃、需要处理时不能仍显示"网络守护中" */}
+                <AnimatedSpan value={enabled ? phaseLabel(phase) : "网络守护未开启"} />
               </h2>
             </div>
-            <p className="vg-guard-description">
-              <span>网络守护会在开机时自动登录校园网</span>
-              <span>持续监测连接 断线时自动重连</span>
-              <span>资源占用可忽略不计 关闭助手不受影响</span>
-            </p>
+            {guardAttention ? (
+              <div className="vg-guard-alert" role="alert">
+                <TriangleAlert aria-hidden="true" />
+                <p>
+                  {phase === "crashed"
+                    ? "后台守护没有响应，重新启动后即可恢复自动登录"
+                    : errorMessage || "守护遇到问题，已暂停自动登录"}
+                </p>
+                {phase === "crashed" ? (
+                  <LensActionButton
+                    label="重新启动守护"
+                    className="vg-quiet-button"
+                    onPress={() => void repair()}
+                  />
+                ) : actionHint?.kind === "portal" ? (
+                  <LensActionButton
+                    label="配置门户"
+                    className="vg-quiet-button"
+                    onPress={onConfigurePortal}
+                  />
+                ) : actionHint?.kind === "account" ? (
+                  <LensActionButton
+                    label="编辑当前账号"
+                    className="vg-quiet-button"
+                    onPress={onEditActiveAccount}
+                  />
+                ) : (
+                  <LensActionButton
+                    label="打开日志目录"
+                    className="vg-quiet-button"
+                    onPress={onOpenDiagnostics}
+                  />
+                )}
+              </div>
+            ) : (
+              <p className="vg-guard-description">
+                <span>网络守护会在开机时自动登录校园网</span>
+                <span>持续监测连接 断线时自动重连</span>
+                <span>资源占用可忽略不计 关闭助手不受影响</span>
+              </p>
+            )}
             <div className="vg-resource-row" aria-label="守护进程资源占用">
               <span><Cpu /><span>CPU</span><strong className="vg-selectable">{enabled ? `${cpuPercent.toFixed(2)} %` : "—"}</strong></span>
               <span><MemoryStick /><span>内存</span><strong className="vg-selectable">{enabled && memoryBytes ? `${(memoryBytes / 1024 / 1024).toFixed(2)} MB` : "—"}</strong></span>
@@ -526,13 +624,6 @@ function NetworkGuard({
         )}
       </div>
       <div className="vg-guard-control">
-        {phase === "crashed" && !starting ? (
-          <LensActionButton
-            label="重新启动"
-            className="vg-quiet-button"
-            onPress={() => void repair()}
-          />
-        ) : null}
         <LensSwitch
           label="网络守护"
           checked={enabled || starting}
@@ -553,6 +644,7 @@ function AccountRecord({
   loggingIn,
   verifying,
   switchDisabled,
+  verifyTitle,
   onSwitch,
   onVerify,
   onEdit,
@@ -568,6 +660,7 @@ function AccountRecord({
   loggingIn: boolean;
   verifying: boolean;
   switchDisabled: boolean;
+  verifyTitle?: string;
   onSwitch: () => void;
   onVerify: () => void;
   onEdit: () => void;
@@ -599,6 +692,7 @@ function AccountRecord({
           <LensActionButton
             label={verifying ? "验证中" : "验证"}
             className="vg-verify-account"
+            title={verifyTitle}
             disabled={switchDisabled || !account.enabled}
             onPress={onVerify}
           />
@@ -895,10 +989,14 @@ function PortalDialog({
 
 function SwitchAccountDialog({
   account,
+  confirmEnabled,
+  onConfirmPreferenceChange,
   onCancel,
   onConfirm,
 }: {
   account: Account | null;
+  confirmEnabled: boolean;
+  onConfirmPreferenceChange: (enabled: boolean) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -916,6 +1014,14 @@ function SwitchAccountDialog({
       )}
     >
       <p className="vg-form-hint">切换过程会短暂断网；如果目标账号登录失败，守护会尝试恢复原账号。</p>
+      <label className="vg-check-row">
+        <input
+          type="checkbox"
+          checked={!confirmEnabled}
+          onChange={event => onConfirmPreferenceChange(!event.target.checked)}
+        />
+        <span>以后直接切换，不再弹出确认</span>
+      </label>
     </LensDialog>
   );
 }
@@ -948,12 +1054,17 @@ export default function LensOriginalApp() {
   const [homeView, setHomeView] = useState<"connection" | "detail">("connection");
   const [accountPage, setAccountPage] = useState(0);
   const [accountsPerPage, setAccountsPerPage] = useState(5);
+  const [appVersion, setAppVersion] = useState(initialSnapshot.daemon_version);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const [confirmSwitchEnabled, setConfirmSwitchEnabled] = useState(readSwitchConfirmEnabled);
+  const [systemDark, setSystemDark] = useState(prefersSystemDark);
   const accountBoardRef = useRef<HTMLDivElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout>>();
   const onlineRef = useRef(online);
   const busyRef = useRef<BusyState>(busy);
   const activeRef = useRef<Account | undefined>();
   const lastErrorRef = useRef<string | null>(null);
+  const snapshotApplied = useRef(false);
   const { theme, setTheme } = useTheme();
   const active = accounts.find(account => account.id === activeId);
   const totalPages = Math.max(1, Math.ceil(accounts.length / accountsPerPage));
@@ -962,7 +1073,8 @@ export default function LensOriginalApp() {
     visiblePage * accountsPerPage,
     visiblePage * accountsPerPage + accountsPerPage,
   );
-  const scene = theme === "dark" ? "ocean" : "aurora";
+  const effectiveDark = theme === "dark" || (theme === "system" && systemDark);
+  const scene = effectiveDark ? "ocean" : "aurora";
 
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => {
@@ -1028,6 +1140,24 @@ export default function LensOriginalApp() {
     activeRef.current = active;
   }, [active]);
   useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    getVersion().then(version => {
+      if (!cancelled) setAppVersion(version);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (theme !== "system") return;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = () => setSystemDark(mediaQuery.matches);
+    handleChange();
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, [theme]);
+  useEffect(() => {
     if (!lastError || lastError === lastErrorRef.current) return;
     lastErrorRef.current = lastError;
     lensToast.error(lastError);
@@ -1074,9 +1204,15 @@ export default function LensOriginalApp() {
     setUser(snapshot.user);
     setMetrics(snapshot.metrics);
     setLastCheckAt(snapshot.last_check_at);
+    // 首次快照只同步、不弹 toast，避免每次启动都重报历史错误（P1#8）
+    if (!snapshotApplied.current) {
+      snapshotApplied.current = true;
+      lastErrorRef.current = snapshot.last_error;
+    }
     setLastError(snapshot.last_error);
     setDaemonConnected(true);
     onlineRef.current = snapshot.online;
+    if (snapshot.last_error !== dismissedError) setDismissedError(null);
     try {
       localStorage.setItem(GUARD_INTENT_KEY, String(snapshot.guard_enabled));
     } catch {
@@ -1228,13 +1364,30 @@ export default function LensOriginalApp() {
 
   function switchAccount(account: Account) {
     if (busyRef.current || !account.enabled || account.id === activeId) return;
+    if (!confirmSwitchEnabled) {
+      void performSwitch(account);
+      return;
+    }
     setPendingSwitch(account);
+  }
+
+  function changeConfirmPreference(enabled: boolean) {
+    setConfirmSwitchEnabled(enabled);
+    try {
+      localStorage.setItem(SWITCH_CONFIRM_KEY, enabled ? "on" : "off");
+    } catch {
+      // Persisting the confirmation preference is optional.
+    }
   }
 
   async function confirmSwitch() {
     const account = pendingSwitch;
     if (!account) return;
     setPendingSwitch(null);
+    await performSwitch(account);
+  }
+
+  async function performSwitch(account: Account) {
     if (!desktopApp) {
       setActiveId(account.id);
       return;
@@ -1270,8 +1423,7 @@ export default function LensOriginalApp() {
       lensToast.success(`${account.username} 验证成功`);
       return;
     }
-    const previousId = activeId;
-    if (!previousId) {
+    if (!activeId) {
       lensToast.error("没有可恢复的原账号");
       return;
     }
@@ -1279,50 +1431,25 @@ export default function LensOriginalApp() {
     busyRef.current = nextBusy;
     setBusy(nextBusy);
     try {
-      let switched: DaemonSnapshot | null = null;
-      try {
-        switched = await sendDaemonCommand({ type: "switch_account", id: account.id });
-      } catch (switchError) {
-        const failedSnapshot = await getDaemonSnapshot().catch(() => null);
-        if (failedSnapshot) applySnapshot(failedSnapshot);
-        lensToast.error(
-          switchError instanceof Error
-            ? `${switchError.message} 请检查 ${account.username} 的账号或密码`
-            : `${account.username} 验证失败，请检查账号或密码`,
-        );
-        return;
-      }
-      const targetState = switched?.accounts.find(entry => entry.id === account.id);
-      if (!switched?.online || !targetState?.verified || switched.active_account_id !== account.id) {
-        const snapshot = await getDaemonSnapshot().catch(() => switched);
-        if (snapshot) applySnapshot(snapshot);
-        lensToast.error(`${account.username} 验证失败，请检查账号或密码`);
-        return;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, 1200));
-      let restored: DaemonSnapshot | null = null;
-      let restoreError: unknown = null;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const candidate = await sendDaemonCommand({ type: "switch_account", id: previousId });
-          if (candidate) {
-            restored = candidate;
-            if (candidate.online && candidate.active_account_id === previousId) break;
-          }
-        } catch (error) {
-          restoreError = error;
-        }
-        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-      const finalSnapshot = restored ?? await getDaemonSnapshot().catch(() => null);
-      if (finalSnapshot) applySnapshot(finalSnapshot);
-      if (finalSnapshot?.online && finalSnapshot.active_account_id === previousId) {
-        lensToast.success(`${account.username} 验证成功，已恢复原账号`);
+      // 守护进程内置验证流程：登录目标账号确认凭据，再自动恢复原账号。
+      const snapshot = await sendDaemonCommand({ type: "verify_account", id: account.id });
+      if (snapshot) applySnapshot(snapshot);
+      // last_error 优先：覆盖"验证成功但原账号恢复失败"这类部分成功的情况
+      if (snapshot?.last_error) {
+        lensToast.error(snapshot.last_error);
+      } else if (snapshot?.accounts.find(entry => entry.id === account.id)?.verified) {
+        lensToast.success(`${account.username} 验证成功，已恢复原账号在线`);
       } else {
-        const detail = restoreError instanceof Error ? `：${restoreError.message}` : "";
-        lensToast.error(`${account.username} 验证成功，但原账号恢复失败${detail}`);
+        lensToast.error(`${account.username} 验证失败，请检查账号或密码`);
       }
+    } catch (error) {
+      const failedSnapshot = await getDaemonSnapshot().catch(() => null);
+      if (failedSnapshot) applySnapshot(failedSnapshot);
+      lensToast.error(
+        error instanceof Error
+          ? error.message
+          : `${account.username} 验证失败，请检查账号或密码`,
+      );
     } finally {
       busyRef.current = null;
       setBusy(null);
@@ -1403,10 +1530,10 @@ export default function LensOriginalApp() {
           <div className="vg-titlebar-spacer" />
           <div className="vg-titlebar-actions" style={NO_DRAG}>
             <LensIconButton
-              label={theme === "dark" ? "切换到流光" : "切换到深海"}
-              icon={theme === "dark" ? "sun" : "moon"}
+              label={THEME_TOGGLE[theme].label}
+              icon={THEME_TOGGLE[theme].icon}
               className="vg-theme-toggle"
-              onPress={() => setTheme(theme === "dark" ? "light" : "dark")}
+              onPress={() => setTheme(THEME_CYCLE[theme])}
             />
             <LensIconButton label="设置" icon="adjust" className="vg-toolbar-icon" onPress={() => setSettingsOpen(true)} />
             <span className="vg-toolbar-separator" />
@@ -1417,14 +1544,32 @@ export default function LensOriginalApp() {
         <main className="vg-main">
           {homeView === "connection" ? (
             <>
+              {daemonConnected && lastError && phase !== "needs_action" && lastError !== dismissedError ? (
+                <div className="vg-error-banner" role="status">
+                  <TriangleAlert aria-hidden="true" />
+                  <span className="vg-selectable">{lastError}</span>
+                  <LensActionButton
+                    label="知道了"
+                    className="vg-quiet-button"
+                    onPress={() => setDismissedError(lastError)}
+                  />
+                </div>
+              ) : null}
               <NetworkGuard
                 enabled={guard}
                 phase={!daemonConnected && guard ? "crashed" : phase}
                 switchFlow={switchFlow}
                 cpuPercent={metrics.process_cpu_percent}
                 memoryBytes={metrics.process_memory_bytes}
+                errorMessage={lastError}
                 onChange={handleGuardChange}
                 onRepair={repairGuard}
+                onConfigurePortal={() => setPortalOpen(true)}
+                onEditActiveAccount={() => {
+                  if (!active) return;
+                  setForm({ mode: "edit", id: active.id, username: active.username, verified: active.verified });
+                }}
+                onOpenDiagnostics={() => void openDiagnostics().catch(() => lensToast.error("无法打开日志目录"))}
               />
 
               <div className="vg-home-grid">
@@ -1471,7 +1616,13 @@ export default function LensOriginalApp() {
                     </dl>
                     <div className="vg-info-footer">
                       <span>最近更新 · {formatClock(lastCheckAt)}</span>
-                      <LensActionButton label="立即检测" className="vg-quiet-button vg-info-action" disabled={!desktopApp || !guard} onPress={() => void checkNow()} />
+                      <LensActionButton
+                        label="立即检测"
+                        className="vg-quiet-button vg-info-action"
+                        disabled={!desktopApp || !guard}
+                        title={!desktopApp || !guard ? "开启网络守护后可用" : "立即检测一次校园网连接"}
+                        onPress={() => void checkNow()}
+                      />
                     </div>
                   </LensPanel>
                 </div>
@@ -1510,6 +1661,7 @@ export default function LensOriginalApp() {
                             switchDisabled={Boolean(busy)}
                             onSwitch={() => switchAccount(account)}
                             onVerify={() => void verifyAccount(account)}
+                            verifyTitle="验证会短暂切换到该账号登录，成功后自动切回当前账号"
                             onEdit={() => setForm({ mode: "edit", id: account.id, username: account.username, verified: account.verified })}
                             onMove={direction => moveAccount(account.id, direction)}
                             onToggle={() => void toggleAccount(account)}
@@ -1518,7 +1670,16 @@ export default function LensOriginalApp() {
                         );
                       })}
                     </div>
-                    {!visibleAccounts.length ? <div className="vg-empty-accounts"><Users /><span>还没有登录账号</span></div> : null}
+                    {!visibleAccounts.length ? (
+                      <button
+                        type="button"
+                        className="vg-empty-accounts"
+                        onClick={() => setForm({ mode: "add", id: crypto.randomUUID(), username: "" })}
+                      >
+                        <Users aria-hidden="true" />
+                        <span>还没有登录账号，点击添加</span>
+                      </button>
+                    ) : null}
                   </div>
                   <div className="vg-account-footer">
                     {totalPages > 1 ? (
@@ -1561,7 +1722,7 @@ export default function LensOriginalApp() {
 
         <footer className="vg-footer">
           <span><Globe2 />{desktopApp ? (daemonConnected ? "后台守护已连接" : "后台守护未运行") : "界面预览"}<span className="vg-footer-dot" />{desktopApp ? (portal?.host ?? "未配置门户") : "演示数据"}</span>
-          <span>VG校园网助手 <b>0.1.13</b></span>
+          <span>VG校园网助手 <b>{appVersion}</b></span>
         </footer>
       </div>
 
@@ -1581,6 +1742,8 @@ export default function LensOriginalApp() {
 
       <SwitchAccountDialog
         account={pendingSwitch}
+        confirmEnabled={confirmSwitchEnabled}
+        onConfirmPreferenceChange={changeConfirmPreference}
         onCancel={() => setPendingSwitch(null)}
         onConfirm={() => void confirmSwitch()}
       />
@@ -1612,7 +1775,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row vg-window-size-row">
             <div>
               <strong>窗口比例</strong>
-              <span>可以逐项测试布局</span>
+              <span>适配不同屏幕的界面比例</span>
             </div>
             <LensTabs
               label="窗口比例"
@@ -1647,6 +1810,7 @@ export default function LensOriginalApp() {
               label={guard ? "立即检测" : "启动守护"}
               className="vg-quiet-button"
               disabled={!desktopApp}
+              title={!desktopApp ? "安装客户端后可用" : undefined}
               onPress={() => {
                 if (guard) void checkNow();
                 else void handleGuardChange(true).catch(() => undefined);
@@ -1677,7 +1841,7 @@ export default function LensOriginalApp() {
           <div className="vg-setting-row">
             <div>
               <strong>版本更新</strong>
-              <span>当前版本 0.1.13 · 不进行后台更新检查</span>
+              <span>当前版本 {appVersion} · 不进行后台更新检查</span>
             </div>
             <LensActionButton
               label="查看新版本"
@@ -1688,11 +1852,8 @@ export default function LensOriginalApp() {
           </div>
           <div className="vg-setting-divider" />
           <div className="vg-system-credit">
-            <div><strong>Lens Design System</strong><span>原始组件 · WebGL 折射 · 弹性与交互音效</span></div>
+            <div><strong>Lens Design System</strong><span>界面组件与光效 · 本地运行，无遥测</span></div>
             <a href="https://github.com/ruiqichenbiec/design-systems" target="_blank" rel="noopener noreferrer">1.1.0 <ExternalLink /></a>
-          </div>
-          <div className="vg-component-list">
-            <span>progress</span><span>switch</span><span>choices</span><span>toggle-tile</span><span>panel</span><span>menu</span>
           </div>
         </div>
       </LensDialog>
