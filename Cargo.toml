@@ -14,7 +14,7 @@ version = "0.1.18"
 edition = "2021"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/v1gn0s/srun-campus-wifi-assistant"
+repository = "https://github.com/s0ng1v/vg-srun-campus-wifi-assistant"
 
 [workspace.dependencies]
 anyhow = "1"

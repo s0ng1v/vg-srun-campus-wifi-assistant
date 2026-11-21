@@ -230,7 +230,7 @@ fn open_diagnostics(app: tauri::AppHandle) -> Result<(), String> {
 fn open_release_page(app: tauri::AppHandle) -> Result<(), String> {
     app.opener()
         .open_url(
-            "https://github.com/v1gn0s/srun-campus-wifi-assistant/releases",
+            "https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases",
             None::<&str>,
         )
         .map_err(|error| error.to_string())
