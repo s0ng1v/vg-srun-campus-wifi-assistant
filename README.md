@@ -48,9 +48,9 @@
 
 ### 第一步：下载与安装
 
-1. 前往本仓库的 [Releases](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases) 页面下载最新安装包：
+1. 前往本仓库的 [Releases](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases) 页面下载最新安装包（也可下载便携压缩包与 `SHA256SUMS.txt` 校验）：
    ```text
-   VG校园网助手_<version>_x64-setup.exe
+   vg-campus-wifi-assistant_<version>_x64-setup.exe
    ```
 2. 运行安装程序（NSIS 安装包），按机器安装至 `C:\Program Files\VG校园网助手`，安装过程中会自动附带守护进程、通知组件与系统配置 helper。
 

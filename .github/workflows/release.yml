@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag name to release (e.g. v0.1.18)"
+        required: true
+        default: "v0.1.18"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Verify Lens source
+        run: npm run check:lens
+
+      - name: Run Rust tests
+        run: cargo test --workspace --locked
+
+      - name: Build application and NSIS installer
+        run: npm run build
+
+      - name: Stage release assets and SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          $version = $pkg.version
+
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          New-Item -ItemType Directory -Force -Path portable-stage | Out-Null
+
+          $nsis = Get-ChildItem "target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $nsis) {
+            throw "NSIS installer not found under target/release/bundle/nsis/"
+          }
+          $installerName = "vg-campus-wifi-assistant_${version}_x64-setup.exe"
+          Copy-Item $nsis.FullName "release-assets/$installerName"
+
+          $binaries = @(
+            "target/release/vg-campus-assistant.exe",
+            "target/release/vg-campus-daemon.exe",
+            "target/release/vg-campus-notifier.exe",
+            "target/release/vg-campus-setup.exe"
+          )
+          foreach ($bin in $binaries) {
+            if (-not (Test-Path $bin)) {
+              throw "Missing binary: $bin"
+            }
+            Copy-Item $bin "portable-stage/"
+          }
+          Copy-Item "LICENSE" "portable-stage/"
+          Copy-Item "THIRD_PARTY_NOTICES.md" "portable-stage/"
+          Copy-Item "licenses" "portable-stage/licenses" -Recurse
+
+          $zipName = "vg-campus-wifi-assistant_${version}_win-x64-portable.zip"
+          Compress-Archive -Path "portable-stage/*" -DestinationPath "release-assets/$zipName"
+
+          Push-Location release-assets
+          Get-ChildItem -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -Encoding utf8 "SHA256SUMS.txt"
+          Pop-Location
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: VG 校园网助手 ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release-assets/*.exe
+            release-assets/*.zip
+            release-assets/SHA256SUMS.txt
