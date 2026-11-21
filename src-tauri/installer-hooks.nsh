@@ -4,6 +4,13 @@
 ; the GUI resolves them as siblings. Depending on the bundler version the
 ; resource map may land under $INSTDIR\resources, so copy them up if needed.
 
+!macro NSIS_HOOK_PREINSTALL
+  nsExec::ExecToLog 'schtasks /End /TN VGCampusWifiAssistantDaemon'
+  nsExec::ExecToLog 'schtasks /End /TN VGCampusWifiAssistantDaemonOnDemand'
+  nsExec::ExecToLog 'taskkill /F /IM vg-campus-daemon.exe'
+  nsExec::ExecToLog 'taskkill /F /IM vg-campus-notifier.exe'
+!macroend
+
 !macro NSIS_HOOK_POSTINSTALL
   IfFileExists "$INSTDIR\resources\vg-campus-daemon.exe" 0 vg_helpers_done
   CopyFiles /SILENT "$INSTDIR\resources\vg-campus-daemon.exe" "$INSTDIR"
@@ -14,6 +21,9 @@
   Delete "$INSTDIR\resources\vg-campus-setup.exe"
   RMDir "$INSTDIR\resources"
   vg_helpers_done:
+  IfFileExists "$INSTDIR\vg-campus-setup.exe" 0 vg_setup_done
+  nsExec::ExecToLog '"$INSTDIR\vg-campus-setup.exe" install --daemon "$INSTDIR\vg-campus-daemon.exe" --notifier "$INSTDIR\vg-campus-notifier.exe" --gui "$INSTDIR\vg-campus-assistant.exe"'
+  vg_setup_done:
 !macroend
 
 ; Stop the running guard, then remove the SYSTEM scheduled tasks and URL
@@ -22,6 +32,7 @@
 !macro NSIS_HOOK_PREUNINSTALL
   nsExec::ExecToLog 'schtasks /End /TN VGCampusWifiAssistantDaemon'
   nsExec::ExecToLog 'schtasks /End /TN VGCampusWifiAssistantDaemonOnDemand'
+  nsExec::ExecToLog 'taskkill /F /IM vg-campus-daemon.exe'
   IfFileExists "$INSTDIR\vg-campus-setup.exe" 0 vg_uninstall_done
   ExecWait '"$INSTDIR\vg-campus-setup.exe" uninstall'
   vg_uninstall_done:

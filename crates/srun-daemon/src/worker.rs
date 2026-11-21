@@ -68,7 +68,12 @@ pub struct GuardWorker {
 
 impl GuardWorker {
     pub fn load(paths: AppPaths, snapshot: SharedSnapshot) -> Result<Self> {
-        let config = load_config(&paths)?;
+        let mut config = load_config(&paths)?;
+        let task_registered = is_auto_start_task_registered();
+        if config.auto_start_enabled != task_registered {
+            config.auto_start_enabled = task_registered;
+            let _ = save_config(&paths, &config);
+        }
         let vault = CredentialVault::load(&paths.credentials)?;
         let mut state = DaemonSnapshot {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
@@ -1405,6 +1410,21 @@ fn format_unix_timestamp(value: &str) -> Option<String> {
 
 fn now_string() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn is_auto_start_task_registered() -> bool {
+    let mut command = std::process::Command::new("schtasks.exe");
+    command
+        .args(["/Query", "/TN", srun_ipc::DAEMON_TASK_NAME])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command.status().is_ok_and(|status| status.success())
 }
 
 fn is_transient(error: &SrunError) -> bool {

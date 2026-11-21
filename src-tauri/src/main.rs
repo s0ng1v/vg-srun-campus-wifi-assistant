@@ -36,12 +36,25 @@ struct StoredAccountMeta {
 struct StoredAppConfig {
     #[serde(default)]
     guard_enabled: bool,
-    #[serde(default)]
-    auto_start_enabled: bool,
     portal: Option<PortalProfile>,
     #[serde(default)]
     accounts: Vec<StoredAccountMeta>,
     active_account_id: Option<String>,
+}
+
+fn is_auto_start_task_registered() -> bool {
+    let mut command = std::process::Command::new("schtasks.exe");
+    command
+        .args(["/Query", "/TN", srun_ipc::DAEMON_TASK_NAME])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command.status().is_ok_and(|status| status.success())
 }
 
 fn data_root_dir() -> PathBuf {
@@ -56,6 +69,7 @@ fn data_root_dir() -> PathBuf {
 
 #[tauri::command]
 fn get_offline_snapshot() -> srun_ipc::DaemonSnapshot {
+    let auto_start_enabled = is_auto_start_task_registered();
     let config_path = data_root_dir().join("config.json");
     let parsed = std::fs::read(&config_path)
         .ok()
@@ -104,7 +118,7 @@ fn get_offline_snapshot() -> srun_ipc::DaemonSnapshot {
             protocol_version: PROTOCOL_VERSION,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             guard_enabled: config.guard_enabled,
-            auto_start_enabled: config.auto_start_enabled,
+            auto_start_enabled,
             phase: if config.guard_enabled {
                 GuardPhase::Crashed
             } else {
@@ -123,7 +137,7 @@ fn get_offline_snapshot() -> srun_ipc::DaemonSnapshot {
         protocol_version: PROTOCOL_VERSION,
         daemon_version: env!("CARGO_PKG_VERSION").into(),
         guard_enabled: false,
-        auto_start_enabled: false,
+        auto_start_enabled,
         phase: GuardPhase::Off,
         online: false,
         active_account_id: None,

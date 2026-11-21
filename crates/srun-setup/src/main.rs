@@ -76,13 +76,9 @@ fn write_ready_file(path: &Path, content: &str) {
 }
 
 fn repair(options: &Options) -> anyhow::Result<()> {
-    let owner_sid = options
-        .owner_sid
-        .clone()
-        .or_else(current_user_sid)
-        .filter(|sid| valid_sid(sid))
-        .ok_or_else(|| anyhow::anyhow!("无法确定当前用户 SID"))?;
     let data_root = data_root();
+    let owner_sid = resolve_owner_sid(options, &data_root)
+        .ok_or_else(|| anyhow::anyhow!("无法确定当前用户 SID"))?;
     secure_data_directory(&data_root, &owner_sid)?;
     register_owner_sid(&owner_sid)?;
     ensure_owner_sid(&data_root.join("owner.sid"), &owner_sid);
@@ -132,16 +128,14 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let daemon = validate_executable(options.daemon.as_deref(), "守护程序")?;
     let notifier = validate_executable(options.notifier.as_deref(), "通知程序")?;
     let gui = validate_executable(options.gui.as_deref(), "图形界面")?;
+    // 升级或覆盖安装前先停止仍在运行的旧守护进程，释放文件锁、命名管道与单实例互斥量。
+    stop_running_daemon();
     let installed =
         install_files(&daemon, &notifier, &gui).with_context(|| "复制受保护程序文件失败")?;
-    let owner_sid = options
-        .owner_sid
-        .clone()
-        .or_else(current_user_sid)
-        .filter(|sid| valid_sid(sid))
+    let data_root = data_root();
+    let owner_sid = resolve_owner_sid(options, &data_root)
         .ok_or_else(|| anyhow::anyhow!("无法确定当前用户 SID"))?;
 
-    let data_root = data_root();
     ensure_data_directory(&data_root)?;
     log("开始修复数据目录权限");
     secure_data_directory(&data_root, &owner_sid)?;
@@ -156,15 +150,10 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let notifier_xml = notifier_task_xml(&installed.notifier, &owner_sid)?;
     register_task(NOTIFIER_TASK_NAME, &notifier_xml)?;
     register_protocol(&installed.gui)?;
-    // 重新安装/升级时先结束仍在运行的旧守护进程，否则旧版本会继续占用本地管道，
-    // 新版本要等到下次重启才会生效。结束命令返回后进程可能尚未完全退出，
-    // 稍等片刻再启动，并在失败时补试一次（已运行时会直接报错，可忽略）。
-    let _ =
-        run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_ONDEMAND_TASK_NAME]));
-    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
-    std::thread::sleep(std::time::Duration::from_millis(900));
+    cleanup_old_app_directories(&installed.app_directory);
+
     let _ = run_hidden(Command::new("schtasks.exe").args(["/Run", "/TN", DAEMON_TASK_NAME]));
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+    std::thread::sleep(std::time::Duration::from_millis(900));
     let _ = run_hidden(Command::new("schtasks.exe").args(["/Run", "/TN", DAEMON_TASK_NAME]));
     log("系统守护任务与通知任务已安装");
     if let Some(path) = &options.ready_file {
@@ -173,7 +162,17 @@ fn install(options: &Options) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn stop_running_daemon() {
+    let _ =
+        run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_ONDEMAND_TASK_NAME]));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", NOTIFIER_TASK_NAME]));
+    let _ = run_hidden(Command::new("taskkill.exe").args(["/F", "/IM", "vg-campus-daemon.exe"]));
+    std::thread::sleep(std::time::Duration::from_millis(450));
+}
+
 struct InstalledBinaries {
+    app_directory: PathBuf,
     daemon: PathBuf,
     notifier: PathBuf,
     gui: PathBuf,
@@ -202,10 +201,33 @@ fn install_files(daemon: &Path, notifier: &Path, gui: &Path) -> anyhow::Result<I
         copy_if_needed(&current, &setup_target)?;
     }
     Ok(InstalledBinaries {
+        app_directory,
         daemon: daemon_target,
         notifier: notifier_target,
         gui: gui_target,
     })
+}
+
+fn cleanup_old_app_directories(active_app_directory: &Path) {
+    let Some(parent) = active_app_directory.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path == active_app_directory {
+            continue;
+        }
+        let is_old_app_dir = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("app-"));
+        if is_old_app_dir {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 }
 
 fn build_directory_stamp() -> u64 {
@@ -251,10 +273,7 @@ fn disable_daemon() -> anyhow::Result<()> {
 }
 
 fn uninstall() -> anyhow::Result<()> {
-    let _ =
-        run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_ONDEMAND_TASK_NAME]));
-    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
-    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", NOTIFIER_TASK_NAME]));
+    stop_running_daemon();
     let _ =
         run_hidden(Command::new("schtasks.exe").args(["/Delete", "/TN", NOTIFIER_TASK_NAME, "/F"]));
     let _ =
@@ -673,6 +692,43 @@ fn validate_executable(path: Option<&Path>, label: &str) -> anyhow::Result<PathB
         anyhow::bail!("{label}不存在：{}", path.display());
     }
     Ok(path.canonicalize()?)
+}
+
+fn resolve_owner_sid(options: &Options, data_root: &Path) -> Option<String> {
+    options
+        .owner_sid
+        .clone()
+        .filter(|sid| valid_user_sid(sid))
+        .or_else(|| existing_owner_sid(data_root).filter(|sid| valid_user_sid(sid)))
+        .or_else(|| current_user_sid().filter(|sid| valid_user_sid(sid)))
+}
+
+fn existing_owner_sid(data_root: &Path) -> Option<String> {
+    let owner_file = data_root.join("owner.sid");
+    if let Ok(sid) = fs::read_to_string(&owner_file) {
+        let trimmed = sid.trim().to_owned();
+        if valid_user_sid(&trimmed) {
+            return Some(trimmed);
+        }
+    }
+    let output = Command::new("reg.exe")
+        .args([
+            "query",
+            r"HKLM\Software\VGCampusWifiAssistant",
+            "/v",
+            "OwnerSid",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .find(|token| valid_user_sid(token))
+        .map(ToOwned::to_owned)
+}
+
+fn valid_user_sid(sid: &str) -> bool {
+    valid_sid(sid) && !sid.eq_ignore_ascii_case("S-1-5-18")
 }
 
 fn current_user_sid() -> Option<String> {

@@ -200,7 +200,7 @@ const SWITCH_LOGIN_STAGE_INDEX = 2;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.17",
+  daemon_version: "0.1.18",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -1094,6 +1094,7 @@ export default function LensOriginalApp() {
   const activeRef = useRef<Account | undefined>();
   const lastErrorRef = useRef<string | null>(null);
   const snapshotApplied = useRef(false);
+  const autoStartRepairAttempted = useRef(false);
   const { theme, setTheme } = useTheme();
   const active = accounts.find(account => account.id === activeId);
   const totalPages = Math.max(1, Math.ceil(accounts.length / accountsPerPage));
@@ -1258,6 +1259,18 @@ export default function LensOriginalApp() {
     if (!snapshotApplied.current) {
       snapshotApplied.current = true;
       lastErrorRef.current = snapshot.last_error;
+    }
+    if (
+      desktopApp
+      && snapshot.guard_enabled
+      && !snapshot.auto_start_enabled
+      && !autoStartRepairAttempted.current
+    ) {
+      autoStartRepairAttempted.current = true;
+      void installSystemIntegration()
+        .then(() => getDaemonSnapshot())
+        .then(applySnapshot)
+        .catch(() => undefined);
     }
     setLastError(snapshot.last_error);
     setDaemonConnected(true);
