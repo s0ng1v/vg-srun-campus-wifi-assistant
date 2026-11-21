@@ -9,21 +9,161 @@ use std::{
     time::Duration,
 };
 
+use serde::Deserialize;
+use srun_core::PortalProfile;
+use srun_ipc::{
+    AccountSummary, DaemonCommand, DaemonSnapshot, GuardPhase, PortalSnapshot, PROTOCOL_VERSION,
+};
 use tauri::{LogicalSize, Manager};
 use tauri_plugin_opener::OpenerExt;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+const DEFAULT_CHD_HOST: &str = "beiradius.chd.edu.cn";
+const DEFAULT_CHD_AC_ID: &str = "5";
+
+#[derive(Debug, Deserialize)]
+struct StoredAccountMeta {
+    id: String,
+    username: String,
+    enabled: bool,
+    verified: bool,
+    #[serde(default)]
+    verification_failed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredAppConfig {
+    #[serde(default)]
+    guard_enabled: bool,
+    #[serde(default)]
+    auto_start_enabled: bool,
+    portal: Option<PortalProfile>,
+    #[serde(default)]
+    accounts: Vec<StoredAccountMeta>,
+    active_account_id: Option<String>,
+}
+
+fn data_root_dir() -> PathBuf {
+    match std::env::var_os("VG_CAMPUS_DATA_DIR") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => std::env::var_os("PROGRAMDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .join("VGCampusWifiAssistant"),
+    }
+}
+
+#[tauri::command]
+fn get_offline_snapshot() -> srun_ipc::DaemonSnapshot {
+    let config_path = data_root_dir().join("config.json");
+    let parsed = std::fs::read(&config_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StoredAppConfig>(&bytes).ok());
+
+    if let Some(config) = parsed {
+        let active_valid = config.active_account_id.as_deref().is_some_and(|id| {
+            config
+                .accounts
+                .iter()
+                .any(|account| account.id == id && account.enabled)
+        });
+        let active_id = if active_valid {
+            config.active_account_id
+        } else {
+            config
+                .accounts
+                .iter()
+                .find(|account| account.enabled)
+                .map(|account| account.id.clone())
+        };
+        let accounts = config
+            .accounts
+            .into_iter()
+            .map(|account| {
+                let active = active_id.as_deref() == Some(account.id.as_str());
+                AccountSummary {
+                    id: account.id,
+                    username: account.username,
+                    enabled: account.enabled,
+                    verified: account.verified,
+                    verification_failed: account.verification_failed,
+                    active,
+                }
+            })
+            .collect();
+        let portal = config.portal.map(|portal| {
+            let host = portal.host().unwrap_or_default();
+            PortalSnapshot {
+                display_name: host.clone(),
+                host,
+                ac_id: portal.ac_id,
+            }
+        });
+        return DaemonSnapshot {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            guard_enabled: config.guard_enabled,
+            auto_start_enabled: config.auto_start_enabled,
+            phase: if config.guard_enabled {
+                GuardPhase::Crashed
+            } else {
+                GuardPhase::Off
+            },
+            online: false,
+            active_account_id: active_id,
+            accounts,
+            portal,
+            ..DaemonSnapshot::default()
+        };
+    }
+
+    let default_host = DEFAULT_CHD_HOST.to_string();
+    DaemonSnapshot {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_version: env!("CARGO_PKG_VERSION").into(),
+        guard_enabled: false,
+        auto_start_enabled: false,
+        phase: GuardPhase::Off,
+        online: false,
+        active_account_id: None,
+        accounts: Vec::new(),
+        portal: Some(PortalSnapshot {
+            host: default_host.clone(),
+            ac_id: DEFAULT_CHD_AC_ID.into(),
+            display_name: default_host,
+        }),
+        ..DaemonSnapshot::default()
+    }
+}
+
 #[tauri::command]
 async fn daemon_request(command: serde_json::Value) -> Result<srun_ipc::CommandResponse, String> {
     let command: srun_ipc::DaemonCommand =
         serde_json::from_value(command).map_err(|error| format!("无效的守护命令：{error}"))?;
-    pipe_client::request(
-        REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+    let should_autostart = !matches!(
         command,
+        DaemonCommand::Ping | DaemonCommand::GetSnapshot | DaemonCommand::Shutdown
+    );
+    let first_attempt = pipe_client::request(
+        REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+        command.clone(),
         Duration::from_secs(45),
     )
-    .await
+    .await;
+    match first_attempt {
+        Ok(response) => Ok(response),
+        Err(error) if should_autostart && error == "校园网守护没有运行" => {
+            launcher::ensure_running_or_repair().await?;
+            pipe_client::request(
+                REQUEST_ID.fetch_add(1, Ordering::Relaxed),
+                command,
+                Duration::from_secs(45),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -64,13 +204,7 @@ async fn discover_portal() -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn open_diagnostics(app: tauri::AppHandle) -> Result<(), String> {
-    let root = match std::env::var_os("VG_CAMPUS_DATA_DIR") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => std::env::var_os("PROGRAMDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("VGCampusWifiAssistant"),
-    };
+    let root = data_root_dir();
     let logs = root.join("logs");
     std::fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
     app.opener()
@@ -158,6 +292,7 @@ fn main() {
             open_release_page,
             daemon_request,
             get_daemon_snapshot,
+            get_offline_snapshot,
             start_daemon,
             install_system_integration,
             discover_portal,

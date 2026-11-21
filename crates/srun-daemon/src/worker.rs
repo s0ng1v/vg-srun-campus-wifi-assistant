@@ -122,20 +122,31 @@ impl GuardWorker {
                     let _ = request.reply.send(result);
                     self.publish().await;
                     if should_shutdown {
+                        tokio::time::sleep(Duration::from_millis(80)).await;
                         break;
                     }
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     if self.config.guard_enabled {
                         self.perform_cycle().await;
+                        while network_events.try_recv().is_ok() {}
                         self.publish().await;
                     } else {
                         self.next_check = None;
                     }
                 }
                 event = network_events.recv() => {
-                    if event.is_some() && self.config.guard_enabled {
-                        self.next_check = Some(Instant::now());
+                    if event.is_some() {
+                        while network_events.try_recv().is_ok() {}
+                        if self.config.guard_enabled
+                            && !(self.state.phase == GuardPhase::NeedsAction && self.next_check.is_none())
+                        {
+                            let wake_at = Instant::now() + Duration::from_millis(400);
+                            self.next_check = Some(match self.next_check {
+                                Some(existing) if existing < wake_at => existing,
+                                _ => wake_at,
+                            });
+                        }
                     }
                 }
             }
@@ -227,6 +238,14 @@ impl GuardWorker {
             return Err("账号不能为空".into());
         }
         let id = draft.id.unwrap_or_else(|| Uuid::new_v4().to_string());
+        if self
+            .config
+            .accounts
+            .iter()
+            .any(|account| account.id != id && account.username.eq_ignore_ascii_case(&username))
+        {
+            return Err("该用户名已存在，请直接编辑现有账号".into());
+        }
         let existing = self.config.accounts.iter().find(|account| account.id == id);
         let password_was_changed = draft
             .password
@@ -272,10 +291,16 @@ impl GuardWorker {
                 verification_failed: false,
             });
         }
-        if self.config.active_account_id.is_none() {
+        if self.enabled_account().is_none() && draft.enabled {
             self.config.active_account_id = Some(id);
+        } else if self.config.active_account_id.is_none() {
+            self.config.active_account_id = self
+                .enabled_account()
+                .map(|account| account.id.clone())
+                .or(Some(id));
         }
         self.save_config()?;
+        self.wake_guard_if_waiting();
         fill_config_snapshot(&mut self.state, &self.config);
         Ok(Some(self.state.clone()))
     }
@@ -297,6 +322,9 @@ impl GuardWorker {
                 .find(|account| account.enabled)
                 .map(|account| account.id.clone());
         }
+        if self.config.guard_enabled && self.enabled_account().is_none() {
+            self.require_action("尚未添加可用账号");
+        }
         self.save_config()?;
         fill_config_snapshot(&mut self.state, &self.config);
         Ok(Some(self.state.clone()))
@@ -317,35 +345,41 @@ impl GuardWorker {
             .ok_or_else(|| "账号不存在".to_string())?;
         let mut preserved_session_account = None;
         if was_active && !enabled {
-            let client = self
-                .cached_client()
-                .map_err(|error| safe_error_ref(&error))?;
-            let current = client
-                .get_user_info_settled(Duration::from_secs(10))
-                .await
-                .map_err(|error| safe_error_ref(&error))?;
-            let domain = self
-                .config
-                .portal
-                .as_ref()
-                .map(|portal| portal.domain.as_str())
-                .unwrap_or_default();
-            let expected = build_username(&selected_username, domain);
-            if current
-                .display_username()
-                .is_some_and(|actual| same_portal_identity(actual, &expected))
-                && current.is_online()
-            {
-                client
-                    .logout(&current)
-                    .await
-                    .map_err(|error| safe_error_ref(&error))?;
-                tokio::time::sleep(Duration::from_millis(750)).await;
-                self.state.online = false;
-                self.state.user = None;
-            } else if current.is_online() {
-                preserved_session_account = self.account_id_for_session(&current);
-                self.state.user = Some(user_snapshot(&current, &self.config));
+            if let Ok(client) = self.cached_client() {
+                if let Ok(current) = client.get_user_info_settled(Duration::from_secs(6)).await {
+                    let domain = self
+                        .config
+                        .portal
+                        .as_ref()
+                        .map(|portal| portal.domain.as_str())
+                        .unwrap_or_default();
+                    let expected = build_username(&selected_username, domain);
+                    if current
+                        .display_username()
+                        .is_some_and(|actual| same_portal_identity(actual, &expected))
+                        && current.is_online()
+                    {
+                        if let Err(error) = client.logout(&current).await {
+                            logging::warn(format!(
+                                "停用账号时注销失败：{}",
+                                safe_error_ref(&error)
+                            ));
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(750)).await;
+                        }
+                        self.state.online = false;
+                        self.state.user = None;
+                    } else if current.is_online() {
+                        preserved_session_account = self.account_id_for_session(&current);
+                        self.state.user = Some(user_snapshot(&current, &self.config));
+                    } else {
+                        self.state.online = false;
+                        self.state.user = None;
+                    }
+                } else {
+                    self.state.online = false;
+                    self.state.user = None;
+                }
             } else {
                 self.state.online = false;
                 self.state.user = None;
@@ -375,6 +409,21 @@ impl GuardWorker {
                 self.state.last_error = Some("没有可用的已启用账号".into());
                 self.next_check = None;
             }
+        } else if enabled {
+            let active_enabled =
+                self.config
+                    .active_account_id
+                    .as_deref()
+                    .is_some_and(|active_id| {
+                        self.config
+                            .accounts
+                            .iter()
+                            .any(|entry| entry.id == active_id && entry.enabled)
+                    });
+            if !active_enabled {
+                self.config.active_account_id = Some(id.to_owned());
+            }
+            self.wake_guard_if_waiting();
         }
         self.save_config()?;
         fill_config_snapshot(&mut self.state, &self.config);
@@ -408,13 +457,15 @@ impl GuardWorker {
         &mut self,
         portal_url: &str,
     ) -> std::result::Result<Option<DaemonSnapshot>, String> {
-        let profile =
+        let mut profile =
             enrich_portal_profile(portal_profile_from_login_url(portal_url).map_err(safe_error)?)
                 .await;
+        crate::config::normalize_portal_profile(&mut profile);
         profile.validate().map_err(|error| error.to_string())?;
         self.config.portal = Some(profile);
         self.portal_client = None;
         self.save_config()?;
+        self.wake_guard_if_waiting();
         fill_config_snapshot(&mut self.state, &self.config);
         Ok(Some(self.state.clone()))
     }
@@ -443,7 +494,9 @@ impl GuardWorker {
         let client = self
             .cached_client()
             .map_err(|error| safe_error_ref(&error))?;
-        self.state.phase = GuardPhase::Reconnecting;
+        if self.config.guard_enabled {
+            self.state.phase = GuardPhase::Reconnecting;
+        }
 
         let current_probe = match client
             .get_user_info_best_effort(Duration::from_secs(2))
@@ -462,6 +515,7 @@ impl GuardWorker {
             .and_then(|info| info.client_ip())
             .unwrap_or_default()
             .to_owned();
+        let was_online = current.as_ref().is_some_and(|info| info.is_online());
         if let Some(current_info) = current.as_ref().filter(|info| info.is_online()) {
             if let Err(error) = client.logout(current_info).await {
                 return Err(self.fail_switch(&error));
@@ -489,15 +543,22 @@ impl GuardWorker {
                 )
                 .await
         };
-        let verified_info = match target_login {
+        let (verified_info, verify_error) = match target_login {
             Ok(info) => {
                 self.mark_verified(id);
-                Some(info)
+                (Some(info), None)
             }
             Err(error) => {
                 logging::warn(format!("账号验证失败：{}", safe_error_ref(&error)));
-                self.mark_verification_failed(id);
-                None
+                if !is_transient(&error)
+                    && !matches!(
+                        &error,
+                        SrunError::Login(failure) if failure.code == "speed_limit_error"
+                    )
+                {
+                    self.mark_verification_failed(id);
+                }
+                (None, Some(safe_error_ref(&error)))
             }
         };
 
@@ -507,17 +568,35 @@ impl GuardWorker {
                 return Err(self.fail_switch(&error));
             }
             tokio::time::sleep(Duration::from_secs(4)).await;
+        } else if !was_online {
+            self.state.phase = if self.config.guard_enabled {
+                GuardPhase::WaitingNetwork
+            } else {
+                GuardPhase::Off
+            };
+            self.save_config()?;
+            fill_config_snapshot(&mut self.state, &self.config);
+            let reason = verify_error.unwrap_or_else(|| "请检查账号或密码".into());
+            return Err(format!("{} 验证失败：{}", target.username, reason));
         }
 
         let Some(previous_id) = previous_id else {
-            self.state.phase = GuardPhase::NeedsAction;
+            self.state.phase = if self.config.guard_enabled {
+                GuardPhase::NeedsAction
+            } else {
+                GuardPhase::Off
+            };
             self.state.last_error = Some("账号已验证，但没有可恢复的原账号".into());
             self.save_config()?;
             fill_config_snapshot(&mut self.state, &self.config);
             return Ok(Some(self.state.clone()));
         };
         let Some(previous) = previous_record else {
-            self.state.phase = GuardPhase::NeedsAction;
+            self.state.phase = if self.config.guard_enabled {
+                GuardPhase::NeedsAction
+            } else {
+                GuardPhase::Off
+            };
             self.state.last_error = Some("账号已验证，但原账号凭据缺失".into());
             self.save_config()?;
             fill_config_snapshot(&mut self.state, &self.config);
@@ -595,10 +674,21 @@ impl GuardWorker {
                         return Ok(Some(self.state.clone()));
                     }
                 }
-                self.state.phase = GuardPhase::NeedsAction;
+                self.state.phase = if self.config.guard_enabled {
+                    GuardPhase::NeedsAction
+                } else {
+                    GuardPhase::Off
+                };
                 self.save_config()?;
                 fill_config_snapshot(&mut self.state, &self.config);
-                Err(format!("验证完成，但恢复原账号失败：{}", error))
+                if let Some(reason) = verify_error {
+                    Err(format!(
+                        "{} 验证失败（{}），且恢复原账号失败：{}",
+                        target.username, reason, error
+                    ))
+                } else {
+                    Err(format!("验证完成，但恢复原账号失败：{}", error))
+                }
             }
         }
     }
@@ -624,7 +714,9 @@ impl GuardWorker {
         let client = self
             .cached_client()
             .map_err(|error| safe_error_ref(&error))?;
-        self.state.phase = GuardPhase::Reconnecting;
+        if self.config.guard_enabled {
+            self.state.phase = GuardPhase::Reconnecting;
+        }
 
         let current_probe = match client
             .get_user_info_best_effort(Duration::from_secs(2))
@@ -675,7 +767,14 @@ impl GuardWorker {
                 Ok(Some(self.state.clone()))
             }
             Err(target_error) => {
-                self.mark_verification_failed(id);
+                if !is_transient(&target_error)
+                    && !matches!(
+                        &target_error,
+                        SrunError::Login(failure) if failure.code == "speed_limit_error"
+                    )
+                {
+                    self.mark_verification_failed(id);
+                }
                 if let Some(old) = old_record {
                     let restored = client
                         .login(&SrunAccount {
@@ -691,12 +790,16 @@ impl GuardWorker {
                 }
                 let _ = self.save_config();
                 fill_config_snapshot(&mut self.state, &self.config);
-                self.set_error(&target_error);
+                if !self.state.online {
+                    self.set_error(&target_error);
+                }
                 let message = format!(
                     "目标账号切换失败，请检查目标账号或密码是否正确；已尝试恢复原账号：{}",
                     safe_error(target_error)
                 );
-                self.state.phase = if self.state.online {
+                self.state.phase = if !self.config.guard_enabled {
+                    GuardPhase::Off
+                } else if self.state.online {
                     GuardPhase::Online
                 } else {
                     GuardPhase::NeedsAction
@@ -711,10 +814,14 @@ impl GuardWorker {
             self.require_action("尚未配置校园网门户");
             return;
         }
-        let Some(active_id) = self.config.active_account_id.clone() else {
+        let Some(active_id) = self.enabled_account().map(|account| account.id.clone()) else {
             self.require_action("尚未添加可用账号");
             return;
         };
+        if self.config.active_account_id.as_deref() != Some(active_id.as_str()) {
+            self.config.active_account_id = Some(active_id.clone());
+            let _ = self.save_config();
+        }
         if self.vault.get(&active_id).is_none() {
             self.require_action("当前账号凭据缺失，请重新录入密码");
             return;
@@ -753,13 +860,9 @@ impl GuardWorker {
                     self.config.active_account_id = Some(id.clone());
                     self.mark_verified(id);
                     let _ = self.save_config();
-                } else {
-                    self.config.active_account_id = None;
-                    let _ = self.save_config();
                 }
                 self.set_online(account_id.as_deref().unwrap_or_default(), info)
                     .await;
-                self.schedule_online_check();
             }
             Ok(info) if !info.is_online() => {
                 self.off_campus_step = 0;
@@ -849,7 +952,7 @@ impl GuardWorker {
 
     async fn authenticate(&mut self, client: PortalClient) {
         self.state.phase = GuardPhase::Authenticating;
-        let active_id = self.config.active_account_id.clone();
+        let active_id = self.enabled_account().map(|account| account.id.clone());
         let account_ids: Vec<String> = active_id
             .into_iter()
             .chain(
@@ -891,6 +994,12 @@ impl GuardWorker {
                         "账号认证失败，准备尝试下一位：id={id}, kind={:?}",
                         failure.kind
                     ));
+                    if failure.kind == LoginFailureKind::InvalidCredentials {
+                        self.mark_verification_failed(&id);
+                        self.config.active_account_id = Some(id.clone());
+                        let _ = self.save_config();
+                        fill_config_snapshot(&mut self.state, &self.config);
+                    }
                     last_failure = Some(SrunError::Login(failure));
                 }
                 Err(error) => {
@@ -967,9 +1076,7 @@ impl GuardWorker {
         self.account_backoff_step = 0;
         self.off_campus_step = 0;
         self.portal_misses = 0;
-        self.state.phase = GuardPhase::Online;
         self.state.online = true;
-        self.state.active_account_id = (!account_id.is_empty()).then(|| account_id.to_owned());
         self.state.user = Some(user_snapshot(&info, &self.config));
         self.state.last_check_at = Some(now_string());
         self.state.last_error = None;
@@ -982,6 +1089,39 @@ impl GuardWorker {
             });
         }
         fill_config_snapshot(&mut self.state, &self.config);
+        if account_id.is_empty() {
+            self.state.active_account_id = None;
+            for account in &mut self.state.accounts {
+                account.active = false;
+            }
+        } else {
+            self.state.active_account_id = Some(account_id.to_owned());
+        }
+        if self.config.guard_enabled {
+            self.state.phase = GuardPhase::Online;
+            self.schedule_online_check();
+        } else {
+            self.state.phase = GuardPhase::Off;
+            self.next_check = None;
+        }
+    }
+
+    fn wake_guard_if_waiting(&mut self) {
+        if !self.config.guard_enabled || self.state.online {
+            return;
+        }
+        if self.config.portal.is_some() && self.enabled_account().is_some() {
+            self.failure_count = 0;
+            self.network_backoff_step = 0;
+            self.account_backoff_step = 0;
+            self.off_campus_step = 0;
+            self.portal_misses = 0;
+            self.action_notification = None;
+            self.state.last_error = None;
+            self.state.next_retry_at = None;
+            self.state.phase = GuardPhase::Reconnecting;
+            self.next_check = Some(Instant::now());
+        }
     }
 
     fn mark_verified(&mut self, id: &str) {
@@ -1119,7 +1259,9 @@ impl GuardWorker {
 
     fn fail_switch(&mut self, error: &SrunError) -> String {
         self.set_error(error);
-        self.state.phase = if self.state.online {
+        self.state.phase = if !self.config.guard_enabled {
+            GuardPhase::Off
+        } else if self.state.online {
             GuardPhase::Online
         } else {
             GuardPhase::NeedsAction

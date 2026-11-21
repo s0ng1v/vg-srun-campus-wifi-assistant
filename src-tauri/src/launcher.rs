@@ -151,10 +151,14 @@ async fn wait_for_ready(ready_file: &std::path::Path, timeout: Duration) -> Resu
     while Instant::now() < deadline {
         if ready_file.is_file() {
             let result = std::fs::read_to_string(ready_file).unwrap_or_default();
+            let trimmed = result.trim();
+            if trimmed.is_empty() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
             let _ = std::fs::remove_file(ready_file);
-            if !result.trim().starts_with("ok") {
-                return Err(result
-                    .trim()
+            if !trimmed.starts_with("ok") {
+                return Err(trimmed
                     .strip_prefix("error:")
                     .unwrap_or("系统集成安装失败")
                     .to_owned());

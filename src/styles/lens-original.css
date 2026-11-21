@@ -1629,8 +1629,17 @@ textarea,
 
 .vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-dialog-heading p,
 .vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-form-label,
-.vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-form-hint {
+.vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-form-hint,
+.vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-check-row {
   color: var(--vg-muted, #62756f);
+}
+
+.vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-form-error {
+  color: #a73944;
+}
+
+.vg-stage[data-scene="ocean"] .vg-dialog-panel .vg-check-row input {
+  accent-color: #2d6f58;
 }
 
 .vg-stage[data-scene="ocean"] .vg-dialog-panel .lg-button[data-variant="success"] {

@@ -103,6 +103,10 @@ export async function getDaemonSnapshot(): Promise<DaemonSnapshot> {
   return invoke<DaemonSnapshot>("get_daemon_snapshot");
 }
 
+export async function getOfflineSnapshot(): Promise<DaemonSnapshot> {
+  return invoke<DaemonSnapshot>("get_offline_snapshot");
+}
+
 export async function sendDaemonCommand(command: DaemonCommand): Promise<DaemonSnapshot | null> {
   const response = await invoke<CommandResponse>("daemon_request", { command });
   if (!response.ok) throw new Error(response.message || "校园网守护操作失败");

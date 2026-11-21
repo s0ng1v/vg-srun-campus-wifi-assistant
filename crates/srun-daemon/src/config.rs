@@ -107,7 +107,13 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
     }
     let mut migrated = config.schema_version < CONFIG_SCHEMA_VERSION;
     let mut invalidate_verification = migrated;
-    if config.active_account_id.is_none() {
+    let active_valid = config.active_account_id.as_deref().is_some_and(|id| {
+        config
+            .accounts
+            .iter()
+            .any(|account| account.id == id && account.enabled)
+    });
+    if !active_valid {
         config.active_account_id = config
             .accounts
             .iter()
@@ -115,22 +121,9 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
             .map(|account| account.id.clone());
     }
     if let Some(portal) = &mut config.portal {
-        if portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL
-            && matches!(portal.ac_id.as_str(), "" | "1")
-        {
-            portal.ac_id = CHD_AC_ID.into();
-            migrated = true;
-            invalidate_verification = true;
-        }
-        if !portal.domain.is_empty() && !srun_core::valid_portal_domain(&portal.domain) {
-            portal.domain.clear();
-            migrated = true;
-            invalidate_verification = true;
-        }
-        if portal.service_url.is_none() && portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL {
-            portal.service_url = Some(CHD_SERVICE_URL.into());
-            migrated = true;
-        }
+        let (portal_migrated, portal_invalidate) = normalize_portal_profile(portal);
+        migrated |= portal_migrated;
+        invalidate_verification |= portal_invalidate;
     }
     if migrated {
         if invalidate_verification {
@@ -142,6 +135,28 @@ pub fn load_config(paths: &AppPaths) -> Result<AppConfig> {
         let _ = save_config(paths, &config);
     }
     Ok(config)
+}
+
+pub fn normalize_portal_profile(portal: &mut PortalProfile) -> (bool, bool) {
+    let mut migrated = false;
+    let mut invalidate_verification = false;
+    if portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL
+        && matches!(portal.ac_id.as_str(), "" | "1")
+    {
+        portal.ac_id = CHD_AC_ID.into();
+        migrated = true;
+        invalidate_verification = true;
+    }
+    if !portal.domain.is_empty() && !srun_core::valid_portal_domain(&portal.domain) {
+        portal.domain.clear();
+        migrated = true;
+        invalidate_verification = true;
+    }
+    if portal.service_url.is_none() && portal.base_url.trim_end_matches('/') == CHD_PORTAL_URL {
+        portal.service_url = Some(CHD_SERVICE_URL.into());
+        migrated = true;
+    }
+    (migrated, invalidate_verification)
 }
 
 pub fn save_config(paths: &AppPaths, config: &AppConfig) -> Result<()> {

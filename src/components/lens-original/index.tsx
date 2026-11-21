@@ -310,11 +310,20 @@ export function LensActionButton({
       handle.destroy();
       handle.element.remove();
     };
-  }, [ariaLabel, className, disabled, label, runtime, sound, title, variant]);
+  }, [className, runtime, sound, variant]);
 
   useEffect(() => {
-    handleRef.current?.setDisabled(disabled);
-  }, [disabled]);
+    const handle = handleRef.current;
+    if (!handle) return;
+    handle.setDisabled(disabled);
+    if (handle.element.textContent !== label) {
+      handle.element.textContent = label;
+    }
+    if (ariaLabel) handle.element.setAttribute("aria-label", ariaLabel);
+    else handle.element.removeAttribute("aria-label");
+    if (title) handle.element.setAttribute("title", title);
+    else handle.element.removeAttribute("title");
+  }, [ariaLabel, disabled, label, title]);
 
   return <span ref={hostRef} className="vg-component-slot" />;
 }
@@ -475,11 +484,14 @@ export function LensIconButton({
       handle.destroy();
       handle.element.remove();
     };
-  }, [decorative, disabled, icon, label, pressed, runtime]);
+  }, [className, decorative, icon, runtime]);
 
   useEffect(() => {
-    handleRef.current?.setDisabled(disabled);
-  }, [disabled]);
+    const handle = handleRef.current;
+    if (!handle) return;
+    handle.setDisabled(disabled);
+    handle.element.setAttribute("aria-label", label);
+  }, [disabled, label]);
 
   useEffect(() => {
     const handle = handleRef.current;
@@ -767,12 +779,16 @@ export function LensSearchField({
       handle.destroy();
       handle.element.remove();
     };
-  }, [autoComplete, label, placeholder, runtime, type]);
+  }, [autoComplete, label, placeholder, runtime]);
 
   useEffect(() => {
-    handleRef.current?.setValue(value);
     const input = handleRef.current?.element.querySelector("input");
-    if (input) input.type = type;
+    if (input && input.value !== value) {
+      handleRef.current?.setValue(value);
+    }
+    if (input && input.type !== type) {
+      input.type = type;
+    }
   }, [type, value]);
 
   return <span ref={hostRef} className="vg-component-slot" />;
@@ -1022,6 +1038,12 @@ const TOAST_EXIT_MS = 200;
 const toastListeners = new Set<ToastListener>();
 let nextToastId = 0;
 
+function toastDurationMs(tone: NotificationTone): number {
+  if (tone === "error") return 3200;
+  if (tone === "info") return 2400;
+  return TOAST_LIFETIME_MS;
+}
+
 function emitToast(tone: NotificationTone, message: string) {
   const entry = { id: ++nextToastId, tone, message, closing: false };
   toastListeners.forEach(listener => listener(entry));
@@ -1101,14 +1123,15 @@ export function LensNotificationHost() {
 
   useEffect(() => {
     const listener: ToastListener = entry => {
+      const lifetime = toastDurationMs(entry.tone);
       setEntries(current => [...current.filter(item => item.message !== entry.message), { ...entry, closing: false }].slice(-3));
       timers.current.set(entry.id, [
         setTimeout(() => {
           setEntries(current => current.map(item => (
             item.id === entry.id ? { ...item, closing: true } : item
           )));
-        }, TOAST_LIFETIME_MS - TOAST_EXIT_MS),
-        setTimeout(() => dismiss(entry.id), TOAST_LIFETIME_MS),
+        }, lifetime - TOAST_EXIT_MS),
+        setTimeout(() => dismiss(entry.id), lifetime),
       ]);
     };
     toastListeners.add(listener);

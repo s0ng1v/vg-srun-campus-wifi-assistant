@@ -57,11 +57,16 @@ impl LoginFailure {
         let fingerprint = format!("{code} {message}").to_lowercase();
         let kind = if fingerprint.contains("password")
             || fingerprint.contains("e01")
+            || fingerprint.contains("e2553")
+            || fingerprint.contains("e2901")
             || fingerprint.contains("密码")
+            || fingerprint.contains("账号错误")
         {
             LoginFailureKind::InvalidCredentials
         } else if fingerprint.contains("balance")
             || fingerprint.contains("insufficient")
+            || fingerprint.contains("arrear")
+            || fingerprint.contains("e2616")
             || fingerprint.contains("余额")
             || fingerprint.contains("欠费")
         {
@@ -69,13 +74,19 @@ impl LoginFailure {
         } else if fingerprint.contains("device")
             || fingerprint.contains("online_device")
             || fingerprint.contains("mac")
+            || fingerprint.contains("e2620")
             || fingerprint.contains("设备")
+            || fingerprint.contains("终端")
+            || fingerprint.contains("超限")
         {
             LoginFailureKind::DeviceLimit
         } else if fingerprint.contains("user not")
             || fingerprint.contains("not exist")
             || fingerprint.contains("disabled")
+            || fingerprint.contains("e2531")
+            || fingerprint.contains("e2606")
             || fingerprint.contains("停用")
+            || fingerprint.contains("禁用")
             || fingerprint.contains("不存在")
         {
             LoginFailureKind::AccountUnavailable

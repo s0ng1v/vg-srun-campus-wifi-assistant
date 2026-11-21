@@ -26,22 +26,44 @@ pub async fn discover_portal() -> Result<PortalProfile, SrunError> {
         if response.status() == StatusCode::NO_CONTENT {
             continue;
         }
-        let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-            continue;
-        };
-        let Ok(value) = location.to_str() else {
-            continue;
-        };
-        let Ok(target) = Url::parse(endpoint).and_then(|base| base.join(value)) else {
-            continue;
-        };
-        if let Ok(profile) = portal_profile_from_login_url(target.as_str()) {
-            return Ok(profile);
+        if let Some(location) = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            if let Ok(target) = Url::parse(endpoint).and_then(|base| base.join(location)) {
+                if let Ok(profile) = portal_profile_from_login_url(target.as_str()) {
+                    return Ok(profile);
+                }
+            }
+        }
+        if let Ok(body) = response.text().await {
+            if let Some(redirect_url) = extract_captive_redirect_url(&body) {
+                if let Ok(target) = Url::parse(endpoint).and_then(|base| base.join(&redirect_url)) {
+                    if let Ok(profile) = portal_profile_from_login_url(target.as_str()) {
+                        return Ok(profile);
+                    }
+                }
+            }
         }
     }
     Err(SrunError::InvalidPortal(
         "未自动发现校园网门户，请粘贴浏览器中的登录页地址".into(),
     ))
+}
+
+pub fn extract_captive_redirect_url(html: &str) -> Option<String> {
+    let patterns = [
+        r#"(?i)(?:location\.href|window\.location(?:\.href)?|top\.location(?:\.href)?)\s*=\s*["']([^"']+(?:srun_portal|ac_id=)[^"']*)["']"#,
+        r#"(?i)url\s*=\s*([^"'\s>]+(?:srun_portal|ac_id=)[^"'\s>]*)"#,
+    ];
+    patterns.iter().find_map(|pattern| {
+        Regex::new(pattern)
+            .ok()?
+            .captures(html)?
+            .get(1)
+            .map(|value| value.as_str().trim().to_owned())
+    })
 }
 
 pub fn portal_profile_from_login_url(input: &str) -> Result<PortalProfile, SrunError> {
@@ -55,13 +77,17 @@ pub fn portal_profile_from_login_url(input: &str) -> Result<PortalProfile, SrunE
     let host = parsed
         .host_str()
         .ok_or_else(|| SrunError::InvalidPortal("登录页地址缺少主机名".into()))?;
+    let base_url = match (parsed.scheme(), parsed.port()) {
+        ("https", Some(port)) => format!("https://{host}:{port}"),
+        _ => format!("https://{host}"),
+    };
     let ac_id = parsed
         .query_pairs()
         .find(|(key, _)| key == "ac_id")
         .map(|(_, value)| value.into_owned())
         .unwrap_or_else(|| "1".into());
     let profile = PortalProfile {
-        base_url: format!("https://{host}"),
+        base_url,
         ac_id,
         domain: String::new(),
         service_url: None,

@@ -61,9 +61,18 @@ fn run() -> anyhow::Result<()> {
         }
     };
     if let (Err(error), Some(path)) = (&result, &options.ready_file) {
-        let _ = fs::write(path, format!("error:{error:#}"));
+        write_ready_file(path, &format!("error:{error:#}"));
     }
     result
+}
+
+fn write_ready_file(path: &Path, content: &str) {
+    let temp = path.with_extension("tmp");
+    if fs::write(&temp, content).is_ok() && fs::rename(&temp, path).is_ok() {
+        return;
+    }
+    let _ = fs::remove_file(&temp);
+    let _ = fs::write(path, content);
 }
 
 fn repair(options: &Options) -> anyhow::Result<()> {
@@ -78,7 +87,7 @@ fn repair(options: &Options) -> anyhow::Result<()> {
     register_owner_sid(&owner_sid)?;
     ensure_owner_sid(&data_root.join("owner.sid"), &owner_sid);
     if let Some(path) = &options.ready_file {
-        fs::write(path, "ok")?;
+        write_ready_file(path, "ok");
     }
     log("数据目录权限修复完成");
     Ok(())
@@ -159,7 +168,7 @@ fn install(options: &Options) -> anyhow::Result<()> {
     let _ = run_hidden(Command::new("schtasks.exe").args(["/Run", "/TN", DAEMON_TASK_NAME]));
     log("系统守护任务与通知任务已安装");
     if let Some(path) = &options.ready_file {
-        let _ = fs::write(path, "ok");
+        write_ready_file(path, "ok");
     }
     Ok(())
 }
@@ -243,6 +252,10 @@ fn disable_daemon() -> anyhow::Result<()> {
 
 fn uninstall() -> anyhow::Result<()> {
     let _ =
+        run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_ONDEMAND_TASK_NAME]));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", DAEMON_TASK_NAME]));
+    let _ = run_hidden(Command::new("schtasks.exe").args(["/End", "/TN", NOTIFIER_TASK_NAME]));
+    let _ =
         run_hidden(Command::new("schtasks.exe").args(["/Delete", "/TN", NOTIFIER_TASK_NAME, "/F"]));
     let _ =
         run_hidden(Command::new("schtasks.exe").args(["/Delete", "/TN", DAEMON_TASK_NAME, "/F"]));
@@ -255,6 +268,11 @@ fn uninstall() -> anyhow::Result<()> {
     let _ = run_hidden(Command::new("reg.exe").args([
         "delete",
         &format!(r"HKLM\Software\Classes\{PROTOCOL}"),
+        "/f",
+    ]));
+    let _ = run_hidden(Command::new("reg.exe").args([
+        "delete",
+        &format!(r"HKLM\Software\Classes\AppUserModelId\{APP_ID}"),
         "/f",
     ]));
     log("系统任务已移除，本地数据未删除");

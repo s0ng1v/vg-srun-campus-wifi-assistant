@@ -72,7 +72,10 @@ fn prune_old_logs(directory: &Path) {
         let is_daemon_log = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("daemon.log"));
+            .is_some_and(|name| {
+                name.starts_with("daemon.log")
+                    || (name.starts_with("daemon-") && name.ends_with(".log"))
+            });
         if !is_daemon_log {
             continue;
         }
@@ -83,5 +86,22 @@ fn prune_old_logs(directory: &Path) {
         if modified < cutoff {
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_dated_daemon_log_filenames() {
+        let directory =
+            std::env::temp_dir().join(format!("vg-campus-log-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let recent = directory.join("daemon-2026-11-21.log");
+        fs::write(&recent, "ok").unwrap();
+        prune_old_logs(&directory);
+        assert!(recent.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 }

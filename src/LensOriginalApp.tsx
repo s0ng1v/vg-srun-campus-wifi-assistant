@@ -47,6 +47,7 @@ import { cn } from "@/lib/utils";
 import {
   discoverPortal,
   getDaemonSnapshot,
+  getOfflineSnapshot,
   installSystemIntegration,
   isDesktopApp,
   openDiagnostics,
@@ -199,7 +200,7 @@ const SWITCH_LOGIN_STAGE_INDEX = 2;
 
 const PREVIEW_SNAPSHOT: DaemonSnapshot = {
   protocol_version: 1,
-  daemon_version: "0.1.16",
+  daemon_version: "0.1.17",
   guard_enabled: true,
   auto_start_enabled: true,
   phase: "online",
@@ -671,8 +672,8 @@ function AccountRecord({
   const [confirmingRemove, setConfirmingRemove] = useState(false);
 
   useEffect(() => {
-    if (active) setConfirmingRemove(false);
-  }, [active]);
+    if (active && online) setConfirmingRemove(false);
+  }, [active, online]);
 
   return (
     <div className="viz-record vg-account-record" data-selected={active} role="listitem">
@@ -681,7 +682,9 @@ function AccountRecord({
       <span className="vg-account-copy">
         <strong>{account.username}</strong>
         {active ? <span className="vg-current-badge"><Check />当前</span> : null}
-        {!account.verified ? (
+        {!account.enabled ? (
+          <span className="vg-disabled-badge">已停用</span>
+        ) : !account.verified ? (
           <span className={account.verification_failed ? "vg-failed-badge" : "vg-pending-badge"}>
             {account.verification_failed ? "验证失败" : "未验证"}
           </span>
@@ -720,7 +723,7 @@ function AccountRecord({
                 { value: "up", label: "上移一行", disabled: index === 0 },
                 { value: "down", label: "下移一行", disabled: index === count - 1 },
                 { value: "toggle", label: account.enabled ? "停用账号" : "启用账号" },
-                { value: "remove", label: "移除账号", disabled: active },
+                { value: "remove", label: "移除账号", disabled: active && online },
               ]}
           onAction={value => {
             if (value === "edit") onEdit();
@@ -870,6 +873,7 @@ function AccountDialog({
         </label>
         {error ? <p className="vg-form-error" role="alert">{error}</p> : null}
         <p className="vg-form-hint"><LockKeyhole />密码仅在本机加密保存，不会上传</p>
+        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
       </form>
     </LensDialog>
   );
@@ -886,7 +890,7 @@ function PortalDialog({
   currentHost?: string;
   currentAcId?: string;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (snapshot?: DaemonSnapshot) => void;
 }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -905,6 +909,11 @@ function PortalDialog({
   async function detect() {
     setBusy(true);
     setError("");
+    if (!isDesktopApp()) {
+      setUrl(currentUrl || "https://beiradius.chd.edu.cn/srun_portal_pc?ac_id=5&theme=pro");
+      setBusy(false);
+      return;
+    }
     try {
       const portal = await discoverPortal();
       setUrl(`${portal.base_url}/srun_portal_pc?ac_id=${encodeURIComponent(portal.ac_id)}&theme=pro`);
@@ -927,11 +936,24 @@ function PortalDialog({
     }
     setBusy(true);
     setError("");
+    if (!isDesktopApp()) {
+      try {
+        const normalized = url.trim().includes("://") ? url.trim() : `https://${url.trim()}`;
+        const parsed = new URL(normalized);
+        if (!parsed.hostname) throw new Error("门户地址缺少主机名");
+        onSaved();
+      } catch {
+        setError("请输入有效的校园网门户地址");
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     try {
       await startDaemon();
       const snapshot = await sendDaemonCommand({ type: "set_portal", portal_url: url.trim() });
       if (!snapshot) throw new Error("守护没有返回门户配置");
-      onSaved();
+      onSaved(snapshot);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "保存校园网门户失败");
     } finally {
@@ -958,7 +980,13 @@ function PortalDialog({
         </>
       )}
     >
-      <div className="vg-form">
+      <form
+        className="vg-form"
+        onSubmit={event => {
+          event.preventDefault();
+          void save();
+        }}
+      >
         {currentHost ? (
           <p className="vg-form-hint"><Globe2 />当前门户：{currentHost}</p>
         ) : null}
@@ -982,7 +1010,8 @@ function PortalDialog({
         </label>
         <p className="vg-form-hint"><LockKeyhole />认证只通过 HTTPS 提交，不会向 HTTP 页面发送账号密码。</p>
         {error ? <p className="vg-form-error" role="alert">{error}</p> : null}
-      </div>
+        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
+      </form>
     </LensDialog>
   );
 }
@@ -1087,13 +1116,30 @@ export default function LensOriginalApp() {
       } catch {
         if (!disposed) {
           setDaemonConnected(false);
+          let intentGuard = false;
           try {
-            if (localStorage.getItem(GUARD_INTENT_KEY) === "true") {
-              setGuard(true);
-              setPhase("crashed");
-            }
+            intentGuard = localStorage.getItem(GUARD_INTENT_KEY) === "true";
           } catch {
             // State persistence is optional in restricted previews.
+          }
+          const offlineSnapshot = await getOfflineSnapshot().catch(() => null);
+          if (disposed) return;
+          if (offlineSnapshot) {
+            setAccounts(offlineSnapshot.accounts);
+            setActiveId(
+              offlineSnapshot.active_account_id
+                ?? offlineSnapshot.accounts.find(account => account.active)?.id
+                ?? "",
+            );
+            setPortal(offlineSnapshot.portal);
+            setOnline(false);
+            setUser(null);
+            const expectedGuard = offlineSnapshot.guard_enabled || intentGuard;
+            setGuard(expectedGuard);
+            setPhase(expectedGuard ? "crashed" : "off");
+          } else if (intentGuard) {
+            setGuard(true);
+            setPhase("crashed");
           }
         }
       }
@@ -1158,7 +1204,11 @@ export default function LensOriginalApp() {
     return () => mediaQuery.removeEventListener("change", handleChange);
   }, [theme]);
   useEffect(() => {
-    if (!lastError || lastError === lastErrorRef.current) return;
+    if (!lastError) {
+      lastErrorRef.current = null;
+      return;
+    }
+    if (lastError === lastErrorRef.current) return;
     lastErrorRef.current = lastError;
     lensToast.error(lastError);
   }, [lastError]);
@@ -1266,6 +1316,7 @@ export default function LensOriginalApp() {
       if (!next) {
         await executeCommand({ type: "shutdown" });
         setDaemonConnected(false);
+        setMetrics(EMPTY_SNAPSHOT.metrics);
       }
       try {
         localStorage.setItem(GUARD_INTENT_KEY, String(next));
@@ -1277,19 +1328,23 @@ export default function LensOriginalApp() {
       }
       lensToast.success(next ? "网络守护已启动" : "网络守护已关闭");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "校园网守护操作失败";
-      setLastError(message);
       throw error;
     }
   }
 
   async function repairGuard() {
-    await handleGuardChange(false);
     await handleGuardChange(true);
   }
 
   async function handleAccountSave(username: string, password: string) {
     if (!form) return;
+    if (
+      accounts.some(
+        account => account.id !== form.id && account.username.toLowerCase() === username.toLowerCase(),
+      )
+    ) {
+      throw new Error("该用户名已存在，请直接编辑现有账号");
+    }
     if (!desktopApp) {
       if (form.mode === "edit" && form.id) {
         setAccounts(previous => previous.map(account => (
@@ -1322,11 +1377,15 @@ export default function LensOriginalApp() {
     lensToast.success(form.mode === "edit" ? "账号修改已保存" : "账号已保存，使用时自动验证");
   }
 
-  function handlePortalSaved() {
+  function handlePortalSaved(snapshot?: DaemonSnapshot) {
     setPortalOpen(false);
-    void getDaemonSnapshot().then(applySnapshot).catch(() => undefined);
+    if (snapshot) {
+      applySnapshot(snapshot);
+    } else if (desktopApp) {
+      void getDaemonSnapshot().then(applySnapshot).catch(() => undefined);
+    }
     lensToast.success("校园网门户已保存");
-    if (accounts.length === 0) {
+    if ((snapshot?.accounts ?? accounts).length === 0) {
       setForm({ mode: "add", id: crypto.randomUUID(), username: "" });
     }
   }
@@ -1403,6 +1462,8 @@ export default function LensOriginalApp() {
       outcome = "success";
       lensToast.success(`已切换到 ${account.username}`);
     } catch (error) {
+      const failedSnapshot = await getDaemonSnapshot().catch(() => null);
+      if (failedSnapshot) applySnapshot(failedSnapshot);
       lensToast.error(error instanceof Error ? error.message : "账号切换失败");
     } finally {
       setSwitchFlow({ key: flowKey, target: account.username, state: outcome });
@@ -1812,8 +1873,14 @@ export default function LensOriginalApp() {
               disabled={!desktopApp}
               title={!desktopApp ? "安装客户端后可用" : undefined}
               onPress={() => {
-                if (guard) void checkNow();
-                else void handleGuardChange(true).catch(() => undefined);
+                if (guard) {
+                  void checkNow();
+                } else {
+                  void handleGuardChange(true).catch(error => {
+                    setSettingsOpen(false);
+                    lensToast.error(error instanceof Error ? error.message : "启动网络守护失败");
+                  });
+                }
               }}
             />
           </div>

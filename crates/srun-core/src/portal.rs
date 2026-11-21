@@ -499,16 +499,37 @@ pub async fn probe_external() -> ExternalProbe {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("VGCampusWifiAssistant/", env!("CARGO_PKG_VERSION")))
             .build()
             .ok()
     }) else {
         return ExternalProbe::Unreachable;
     };
 
-    match client.get("https://www.baidu.com/robots.txt").send().await {
-        Ok(response) if response.status().is_success() => ExternalProbe::Reachable,
-        _ => ExternalProbe::Unreachable,
+    if let Ok(response) = client.get("https://www.baidu.com/robots.txt").send().await {
+        if response.status().is_success() {
+            return ExternalProbe::Reachable;
+        }
     }
+    if let Ok(response) = client
+        .get("http://connect.rom.miui.com/generate_204")
+        .send()
+        .await
+    {
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return ExternalProbe::Reachable;
+        }
+    }
+    if let Ok(response) = client
+        .get("http://connectivitycheck.gstatic.com/generate_204")
+        .send()
+        .await
+    {
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return ExternalProbe::Reachable;
+        }
+    }
+    ExternalProbe::Unreachable
 }
 
 fn parse_jsonp(input: &str) -> Result<Value, SrunError> {

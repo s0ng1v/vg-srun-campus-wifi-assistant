@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const vendor = resolve(root, "src/vendor/lens-design-system");
-const expected = "3d1d5496896f2cdffd76686429dd1ce7e5a6719957d87faf90d9029cbf501015";
+const expected = "00d886c0eb279f16f2093214576a9d44ebf802f5349d98950add2f8210c89f00";
 const sourceExtensions = new Set([".css", ".d.ts", ".js", ".json", ".ts"]);
 
 function collect(directory) {
@@ -28,7 +28,7 @@ const files = collect(vendor).sort((left, right) => {
 for (const file of files) {
   const name = relative(vendor, file).split(sep).join("/");
   hash.update(`${name}\0`, "utf8");
-  hash.update(readFileSync(file));
+  hash.update(readFileSync(file, "utf8").replace(/\r\n/g, "\n"), "utf8");
 }
 
 const actual = hash.digest("hex");
