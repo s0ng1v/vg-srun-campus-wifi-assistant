@@ -23,11 +23,10 @@
 
 <br />
 
-<img src="docs/media/promo-preview.webp" alt="VG 校园网助手宣传演示动画" width="88%" />
-
-<sub>🎬 <a href="docs/media/promo.mp4">点击查看 1080p 60fps 完整有声宣传视频（MP4）</a></sub>
 
 </div>
+
+https://github.com/user-attachments/assets/040a97c5-7fca-4de4-a639-2b8969f98a73
 
 ---
 
