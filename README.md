@@ -1,116 +1,182 @@
-# VG 校园网助手 (VG Campus Wi-Fi Assistant)
+<div align="center">
 
-面向 Windows 10 / 11 的轻量级 **深澜（Srun）Web Portal 校园网自动认证与断线守护工具**。  
-基于 Tauri + React + Rust 构建，在后台以轻量级本地守护进程保持运行，支持 **开机登录 Windows 前自动认证**、**多账号顺序故障转移**、**有线/Wi-Fi 自适应重连** 与 **非校园网静默等待**。
+<img src="src-tauri/icons/icon.png" width="96" height="96" alt="VG 校园网助手 Logo" />
 
-> 当前状态：开发中（`v0.1.18`）。桌面端界面、Rust 认证核心、后台守护进程、本地命名管道 IPC、系统任务安装器与 Windows Toast 通知已完成集成；真实网络环境目前已在 **长安大学深澜门户** 完成验证，其他高校的深澜 Portal 欢迎按下方步骤测试并反馈兼容性。
+# VG 校园网助手
 
-<p align="center">
-  <img src="docs/images/home-aurora.png" alt="VG 校园网助手主界面（流光主题）" width="90%" />
-</p>
+**轻量、安全、开机即守的 Windows 深澜（Srun）Web Portal 自动认证与断线守护工具**
+
+[![Release](https://img.shields.io/github/v/release/s0ng1v/vg-srun-campus-wifi-assistant?style=for-the-badge&logo=github&color=5b6ee1&label=Release)](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/s0ng1v/vg-srun-campus-wifi-assistant/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/s0ng1v/vg-srun-campus-wifi-assistant/total?style=for-the-badge&color=2ea043&label=Downloads)](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases)
+![Platform](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)
+[![License](https://img.shields.io/github/license/s0ng1v/vg-srun-campus-wifi-assistant?style=for-the-badge&color=f59e0b&label=License)](LICENSE)
+
+![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8D8?style=flat-square&logo=tauri&logoColor=white)
+![Rust](https://img.shields.io/badge/Rust-1.90%2B-CE422B?style=flat-square&logo=rust&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white)
+![Security](https://img.shields.io/badge/Credentials-Windows%20DPAPI-16A34A?style=flat-square&logo=shield&logoColor=white)
+
+[⬇️ 下载最新版](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases/latest) · [✨ 核心特性](#-核心特性) · [🖼️ 界面预览](#-界面预览) · [🚀 快速上手](#-快速上手) · [🛡️ 架构与安全](#-架构与安全) · [🛠️ 源码构建](#-从源码构建)
+
+<br />
+
+<img src="docs/media/promo-preview.webp" alt="VG 校园网助手宣传演示动画" width="88%" />
+
+<sub>🎬 <a href="docs/media/promo.mp4">点击查看 1080p 60fps 完整有声宣传视频（MP4）</a></sub>
+
+</div>
 
 ---
 
-## 核心特性
+> [!NOTE]
+> **当前进度（`v0.1.18`）**：桌面端界面、Rust 认证核心、独立后台守护进程、本地命名管道 IPC、系统计划任务安装器与 Windows Toast 通知已全部集成；真实网络目前已在 **长安大学深澜门户** 完成验证，欢迎其他高校用户按下方步骤测试并提交兼容反馈。
 
-- **深澜 Web Portal 原生认证**：Rust 原生实现深澜 XEncode、换表 Base64、HMAC-MD5 与 SHA-1 协议，无需常驻浏览器或 Python 运行环境。
-- **自动发现门户**：首次配置支持一键自动探测当前网络下的深澜门户与 `ac_id`；探测失败时可直接粘贴浏览器中的登录页 URL 解析保存。
-- **开机即守，脱离界面运行**：开启「网络守护」后注册受保护的系统开机任务（`SYSTEM` 身份运行），在 Windows 登录界面即可完成联网；关闭 GUI 窗口后守护进程仍在后台持续工作。
-- **多账号顺序故障转移**：支持添加主账号与多个备用账号、在线一键验证凭据、拖拽/上移下移调整优先级；主账号认证失败时自动按顺序尝试下一个可用账号，手动切号失败时自动尝试回切原账号。
-- **有线 & Wi-Fi 断线秒级感知**：监听 Windows 网卡与连接状态变化，网线拔插或 Wi-Fi 重连后立即唤醒检查并恢复登录。
-- **非校园网静默休眠**：当电脑连接到家里 Wi-Fi、手机热点等非校园网环境（门户不可达）时，自动进入低频静默复探（30s → 60s → 180s → 300s），**绝不乱试账号、绝不弹出断网误报**；切回校园网后立即自动恢复。
-- **本地加密与零遥测**：账号密码仅使用机器级 **Windows DPAPI** 加密保存于本机，认证请求强制要求 HTTPS，日志自动脱敏，不收集任何遥测数据。
-- **双主题光学玻璃界面**：基于 Lens Design System，提供「流光（浅色）」与「深海（深色）」双主题及多档窗口比例预设。
+> [!IMPORTANT]
+> **适用范围与合规说明**  
+> - **支持**：基于深澜（Srun）Web Portal（HTTPS）的校园网认证，同时支持有线网与 Wi-Fi。  
+> - **暂不支持**：802.1X、PPPoE 拨号、图形验证码、短信验证码，以及多学校门户配置文件并存。  
+> - **合规声明**：本项目仅用于常规自动认证与断线重连，**不会绕过**学校计费规则、在线设备数量限制或网络访问策略，使用行为仍受所在学校网络管理规定约束。
 
 ---
 
-## 界面预览
+## ✨ 核心特性
 
-| 流光浅色主题（主界面） | 深海深色主题（主界面） |
+<table>
+  <tr>
+    <td width="50%">
+      <h4>⚡ 原生深澜协议栈</h4>
+      <p>Rust 原生实现深澜 XEncode、换表 Base64、HMAC-MD5 与 SHA-1 算法，无需常驻浏览器或 Python 运行时，资源占用极低。</p>
+    </td>
+    <td width="50%">
+      <h4>🔄 开机即守 · 脱离界面运行</h4>
+      <p>注册受保护的 <code>SYSTEM</code> 开机计划任务，在进入 Windows 桌面之前即可完成联网；关闭 GUI 窗口后守护进程仍在后台持续工作。</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>🔀 多账号顺序故障转移</h4>
+      <p>支持维护主备多个账号、一键在线验证凭据、上下调整优先级；主账号异常时自动尝试下一账号，手动切号失败自动尝试回切。</p>
+    </td>
+    <td>
+      <h4>🔌 有线 &amp; Wi-Fi 秒级自适应</h4>
+      <p>监听 Windows 网卡与网络连接变化事件，插拔网线或切换 Wi-Fi 后立即唤醒状态机检测并恢复登录。</p>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <h4>🌙 非校园网静默休眠</h4>
+      <p>当连接家庭 Wi-Fi、手机热点等非校园网（门户不可达）时，自动进入低频复探（30s → 60s → 180s → 300s），<b>不乱试账号、不弹误报</b>。</p>
+    </td>
+    <td>
+      <h4>🔐 DPAPI 加密与零遥测</h4>
+      <p>凭据通过机器级 <b>Windows DPAPI</b> 加密存放在本机，强制 HTTPS 提交认证，日志自动脱敏，无任何后台遥测或联网上报。</p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🖼️ 界面预览
+
+基于 **Lens Design System** 打造的双主题光学玻璃界面，支持浅色「流光」与深色「深海」主题自由切换：
+
+| ☀️ 流光浅色主题（主界面） | 🌙 深海深色主题（主界面） |
 | :---: | :---: |
 | <img src="docs/images/home-aurora.png" alt="主界面流光浅色主题" /> | <img src="docs/images/home-ocean.png" alt="主界面深海深色主题" /> |
 
-| 账号与连接详情 | 校园网门户配置 | 系统设置 |
+| 📊 账号与连接详情 | 🌐 校园网门户配置 | ⚙️ 系统设置 |
 | :---: | :---: | :---: |
 | <img src="docs/images/account-detail.png" alt="账号详情页" /> | <img src="docs/images/portal-dialog.png" alt="门户配置弹窗" /> | <img src="docs/images/settings-dialog.png" alt="系统设置弹窗" /> |
 
 ---
 
-## 适用范围与限制
+## 🚀 快速上手
 
-- **支持**：基于深澜（Srun）Web Portal（HTTPS）认证的校园网，支持有线网与 Wi-Fi。
-- **暂不支持**：802.1X 认证、PPPoE 拨号、图形验证码、短信验证码，以及多学校门户配置文件并存。
-- **合规声明**：本项目仅用于自动完成常规校园网门户认证与断线重连，**不会绕过**学校计费规则、在线设备数量限制或网络访问策略。使用本项目产生的网络行为仍需遵守所在学校的网络管理规定。
+### 1️⃣ 下载与安装
 
----
+前往 [**Releases 页面**](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases/latest) 下载最新版安装程序（也可下载便携压缩包与 `SHA256SUMS.txt` 校验完整性）：
 
-## 快速上手（使用步骤）
+```text
+vg-campus-wifi-assistant_<version>_x64-setup.exe
+```
 
-### 第一步：下载与安装
+运行安装向导（NSIS 安装包），程序默认安装至 `C:\Program Files\VG校园网助手`，并自动打包守护进程、通知组件与系统安装器。
 
-1. 前往本仓库的 [Releases](https://github.com/s0ng1v/vg-srun-campus-wifi-assistant/releases) 页面下载最新安装包（也可下载便携压缩包与 `SHA256SUMS.txt` 校验）：
-   ```text
-   vg-campus-wifi-assistant_<version>_x64-setup.exe
-   ```
-2. 运行安装程序（NSIS 安装包），按机器安装至 `C:\Program Files\VG校园网助手`，安装过程中会自动附带守护进程、通知组件与系统配置 helper。
+### 2️⃣ 配置校园网门户
 
-### 第二步：配置校园网门户
-
-1. 确保电脑当前已连接到校园网（有线网口或校园 Wi-Fi）。
+1. 确保电脑已接入校园网（有线网口或校园 Wi-Fi）。
 2. 打开 **VG 校园网助手**，点击右上角 **设置（⚙）→ 配置门户**。
-3. 点击 **自动识别校园网门户**；如果当前已在线未触发跳转，或自动识别未能命中，请用浏览器打开任意网页触发学校认证页，复制完整登录页地址（例如 `https://portal.example.edu.cn/srun_portal_pc?ac_id=5`）粘贴并保存。
+3. 点击 **自动识别校园网门户**；若当前已在线未发生跳转或自动识别未命中，可在浏览器打开任意网页触发学校认证页，复制完整登录页 URL（例如 `https://portal.example.edu.cn/srun_portal_pc?ac_id=5`）粘贴并保存。
 
-### 第三步：添加与验证登录账号
+### 3️⃣ 添加与验证登录账号
 
-1. 在主界面右侧 **登录账号** 面板点击 **＋ 添加账号**，输入校园网账号和密码并保存。
-2. 如有多个备用账号，可继续添加，并通过每行右侧 `···` 菜单中的 **上移一行 / 下移一行** 调整尝试顺序。
-3. 对于暂未使用的备用账号，可点击 **验证** 按钮测试凭据有效性（程序会短暂切换验证并自动切回当前在线账号）。
+1. 在主界面右侧 **登录账号** 面板点击 **＋ 添加账号**，填写校园网账号与密码并保存。
+2. 如有多个备用账号，可继续添加，并通过每行右侧 `···` 菜单中的 **上移一行 / 下移一行** 调整故障转移顺序。
+3. 未验证的备用账号可点击 **验证** 按钮测试凭据有效性（程序会短暂切换测试，并在完成后自动切回当前在线账号）。
 
-### 第四步：开启「网络守护」
+### 4️⃣ 开启「网络守护」
 
 1. 打开主界面顶部的 **网络守护** 开关。
-2. 首次开启时会请求一次管理员权限（UAC），由 `vg-campus-setup.exe` 完成以下安全部署：
+2. 首次开启会弹出一次管理员权限（UAC）请求，由 `vg-campus-setup.exe` 完成受保护部署：
    - 将主程序、守护进程与通知 helper 复制到受保护目录 `C:\Program Files\VGCampusWifiAssistant\app-<version>\`；
    - 注册开机以 `SYSTEM` 身份运行的守护任务与按需触发的用户桌面 Toast 通知任务；
    - 注册通知点击唤醒窗口使用的 URI 协议（`vg-campus-wifi-assistant://`）。
-3. 开启后即可直接关闭应用窗口——守护进程将继续在后台独立运行，在断线或重启电脑停留在 Windows 登录界面时自动完成联网。
+3. 开启后即可直接关闭窗口——守护进程将在后台独立驻留，断线重连或重启电脑停留在 Windows 登录界面时均可自动完成认证。
 
-### 卸载说明
-
-- 通过 Windows「应用和功能」或安装目录下的卸载程序卸载时，系统任务与 URI 协议会自动移除；
-- 运行时配置、加密凭据与脱敏日志保存在 `C:\ProgramData\VGCampusWifiAssistant\`，卸载时默认保留以便重装恢复，如需彻底清理可手动删除该目录。
+> [!TIP]
+> **关于卸载与数据清理**：通过 Windows「应用和功能」卸载时，系统计划任务与 URI 协议会自动移除；运行时配置、加密凭据与脱敏日志保存在 `C:\ProgramData\VGCampusWifiAssistant\`，卸载时默认保留以便重装恢复，如需彻底清除可手动删除该目录。
 
 ---
 
-## 架构与安全设计
+## 🛡️ 架构与安全
 
-项目由 4 个协同工作的原生可执行文件组成（详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)）：
+项目由 4 个职责隔离的原生可执行文件协同工作（完整设计见 [架构说明](docs/ARCHITECTURE.md)）：
 
-| 可执行文件 | 职责说明 |
+```mermaid
+flowchart LR
+    GUI["vg-campus-assistant.exe\nTauri GUI · 无明文密码权限"]
+    PIPE["本地命名管道 IPC\nOwner / SYSTEM / Admin ACL"]
+    DAEMON["vg-campus-daemon.exe\nSYSTEM 守护进程 · 状态机"]
+    VAULT[("Windows DPAPI\ncredentials.dat")]
+    PORTAL["深澜 Web Portal\n强制 HTTPS 认证"]
+    NOTIFIER["vg-campus-notifier.exe\n按需 Toast 通知"]
+    SETUP["vg-campus-setup.exe\n受保护目录与系统任务管理"]
+
+    GUI <--> PIPE
+    PIPE <--> DAEMON
+    DAEMON <--> VAULT
+    DAEMON <--> PORTAL
+    DAEMON --> NOTIFIER
+    SETUP -. "部署与注册任务" .-> DAEMON
+```
+
+| 组件 | 职责说明 |
 | --- | --- |
-| `vg-campus-assistant.exe` | Tauri 桌面 GUI，仅负责交互与状态展示，不直接持有明文密码 |
-| `vg-campus-daemon.exe` | 无界面后台守护进程，负责网卡监听、状态机、探测与认证 |
-| `vg-campus-notifier.exe` | 短生命周期 Windows Toast 通知 helper，仅在用户桌面按需触发 |
-| `vg-campus-setup.exe` | 安装、升级与卸载时注册/清理受保护目录及系统计划任务 |
+| `vg-campus-assistant.exe` | Tauri 桌面界面，仅负责状态展示与指令下发，无法读取已保存的明文密码 |
+| `vg-campus-daemon.exe` | 无界面后台守护进程，负责网卡事件监听、状态机调度、连通性探针与深澜认证 |
+| `vg-campus-notifier.exe` | 短生命周期 Windows Toast 通知 helper，仅接收事件码并在用户桌面弹窗后退出 |
+| `vg-campus-setup.exe` | 安装、覆盖升级与卸载时管理受保护程序目录、计划任务与 URI 协议 |
 
-安全边界：
-- **最小权限与受保护路径**：`SYSTEM` 计划任务仅执行受保护 `Program Files` 目录下的二进制文件，避免用户可写目录提权风险。
-- **本地凭据加密**：账号密码通过机器级 Windows DPAPI 加密存储在 `C:\ProgramData\VGCampusWifiAssistant\credentials.dat`，GUI 侧无法读取明文密码。
-- **IPC 访问控制**：本地命名管道通过所有者 SID、`SYSTEM` 与管理员 ACL 限制访问。
-- **强制 HTTPS 与脱敏日志**：拒绝向非 HTTPS 门户提交凭据；诊断日志自动剔除密码、challenge 与完整认证 URL。
+**本地安全边界**：
+- **防提权路径隔离**：`SYSTEM` 计划任务只指向 `Program Files` 受保护目录中的二进制文件，不从用户可写目录加载程序。
+- **凭据强加密**：账号密码使用机器级 Windows DPAPI 加密，仅 `SYSTEM`、管理员与所有者可读。
+- **通道与协议约束**：本地命名管道强制校验访问控制列表（ACL）；对外认证严格拒绝非 HTTPS 门户；诊断日志自动剔除密码、challenge 与完整认证 URL。
 
 ---
 
-## 从源码构建与开发
+## 🛠️ 从源码构建
 
 ### 环境要求
 
 - **操作系统**：Windows 10 / 11
 - **Node.js**：`20.19+`（CI 使用 Node 22）
-- **Rust**：`1.90+`（随附 `rust-toolchain.toml`）
-- **运行时**：Microsoft Edge WebView2（Windows 11 默认自带）
+- **Rust**：`1.90+`（随附 [rust-toolchain.toml](rust-toolchain.toml)）
+- **WebView 运行时**：Microsoft Edge WebView2（Windows 11 默认内置）
 
-### 本地开发与调试
+### 本地开发与构建
 
 ```powershell
 # 1. 克隆仓库
@@ -120,24 +186,24 @@ cd vg-srun-campus-wifi-assistant
 # 2. 安装前端依赖
 npm install
 
-# 3. 启动桌面端开发模式（会自动编译 daemon / notifier / setup sidecars）
+# 3. 启动完整桌面端开发模式（自动编译 daemon / notifier / setup sidecars）
 npm run dev
-```
 
-如果仅需在浏览器中预览前端界面（无真实守护进程，自动加载内置演示数据）：
-
-```powershell
+# 或仅启动浏览器界面预览（自动使用内置演示数据，无需守护进程）
 npm run dev:renderer
 ```
 
-### 生产构建
+生产构建（生成可执行文件与 NSIS 安装包）：
 
 ```powershell
 npm ci
 npm run build
 ```
 
-构建产物位置：
+<details>
+<summary>📦 查看构建产物路径与质量校验命令</summary>
+
+#### 生产构建产物
 - 独立可执行文件（`target/release/`）：
   - `vg-campus-assistant.exe`
   - `vg-campus-daemon.exe`
@@ -146,8 +212,7 @@ npm run build
 - 单文件 NSIS 安装包：
   - `target/release/bundle/nsis/VG校园网助手_<version>_x64-setup.exe`
 
-### 质量校验
-
+#### CI 质量校验命令
 ```powershell
 npm run check:lens
 npm run build:renderer
@@ -156,16 +221,18 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
+</details>
+
 ---
 
-## 文档与贡献
+## 📚 相关文档
 
-- [架构说明](docs/ARCHITECTURE.md)
-- [验收清单](docs/ACCEPTANCE.md)（包含真机网络验收步骤与发布前检查项）
-- [开发路线](docs/ROADMAP.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全政策](SECURITY.md)
+- [架构说明](docs/ARCHITECTURE.md) — 进程模型、网络状态机与本地安全边界
+- [验收清单](docs/ACCEPTANCE.md) — 自动化测试覆盖项、真机网络验收与发布检查清单
+- [开发路线](docs/ROADMAP.md) — M0 ~ M4 里程碑规划与进度
+- [贡献指南](CONTRIBUTING.md) — 开发规范、协议测试规则与提交格式
+- [安全政策](SECURITY.md) — 漏洞反馈渠道与凭据处理规范
 
-## 许可证
+## 📄 开源许可
 
 本项目基于 [MIT License](LICENSE) 开源。第三方组件许可详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [licenses/](licenses/)。
